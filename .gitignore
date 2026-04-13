@@ -3,6 +3,10 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Ignore user configs
+backup/*
+config/*
+
 # C extensions
 *.so
 

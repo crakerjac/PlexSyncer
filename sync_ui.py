@@ -11,7 +11,8 @@ import os, json, glob, subprocess, sys
 from typing import Optional
 import streamlit as st
 
-VERSION = 'v0.1.14'
+VERSION = 'v0.1.17'
+APP_ICON = '📼'
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 CONFIGS_DIR = os.path.join(SCRIPT_DIR, 'configs')
@@ -341,7 +342,7 @@ def build_selections_from_widgets(slot: str) -> dict:
 
 def render_sidebar() -> Optional[str]:
     with st.sidebar:
-        st.title('PlexSyncer')
+        st.title(f'{APP_ICON} PlexSyncer')
         st.divider()
 
         # ── 1. Plex connection ────────────────────────────────────────────────
@@ -521,32 +522,32 @@ def render_movie_tab(section: dict, slot: str) -> None:
     s_movies, _, _ = _get_saved()
     n_sel    = _sel_count_saved(s_movies)
 
-    ca, cb, cc, ci = st.columns([1, 1, 1, 4])
-    with ca:
-        if st.button('All', key=f'mov_all_{slot}_{section["key"]}'):
-            for i in items:
-                st.session_state[f'chk_mov_{slot}_{i["ratingKey"]}'] = True
-            st.session_state['_saved_movies'] = {i['title'] for i in items}
-            st.session_state['_dirty']        = True
-            st.rerun()
-    with cb:
-        if st.button('None', key=f'mov_none_{slot}_{section["key"]}'):
-            for i in items:
-                st.session_state[f'chk_mov_{slot}_{i["ratingKey"]}'] = False
-            st.session_state['_saved_movies'] = set()
-            st.session_state['_dirty']        = True
-            st.rerun()
-    with cc:
-        if st.button('Invert', key=f'mov_inv_{slot}_{section["key"]}'):
-            for i in items:
-                k = f'chk_mov_{slot}_{i["ratingKey"]}'
-                st.session_state[k] = not st.session_state.get(k, False)
-            st.session_state['_saved_movies'] = {
-                i['title'] for i in items
-                if st.session_state.get(f'chk_mov_{slot}_{i["ratingKey"]}', False)}
-            st.session_state['_dirty'] = True
-            st.rerun()
-    ci.caption(f'{n_sel} selected · {len(filtered)} shown · {len(items)} total')
+    c_actions, c_info = st.columns([1, 4])
+    with c_actions:
+        with st.popover("☑️ Bulk Actions", use_container_width=True):
+            if st.button('Select All', key=f'mov_all_{slot}_{section["key"]}', use_container_width=True):
+                for i in items:
+                    st.session_state[f'chk_mov_{slot}_{i["ratingKey"]}'] = True
+                st.session_state['_saved_movies'] = {i['title'] for i in items}
+                st.session_state['_dirty']        = True
+                st.rerun()
+            if st.button('Select None', key=f'mov_none_{slot}_{section["key"]}', use_container_width=True):
+                for i in items:
+                    st.session_state[f'chk_mov_{slot}_{i["ratingKey"]}'] = False
+                st.session_state['_saved_movies'] = set()
+                st.session_state['_dirty']        = True
+                st.rerun()
+            if st.button('Invert Selection', key=f'mov_inv_{slot}_{section["key"]}', use_container_width=True):
+                for i in items:
+                    k = f'chk_mov_{slot}_{i["ratingKey"]}'
+                    st.session_state[k] = not st.session_state.get(k, False)
+                st.session_state['_saved_movies'] = {
+                    i['title'] for i in items
+                    if st.session_state.get(f'chk_mov_{slot}_{i["ratingKey"]}', False)}
+                st.session_state['_dirty'] = True
+                st.rerun()
+                
+    c_info.caption(f'{n_sel} selected · {len(filtered)} shown · {len(items)} total')
 
     page_items, n_pages, page = _pagination_controls(filtered, f'page_mov_{section["key"]}')
     if n_pages > 1:
@@ -579,37 +580,37 @@ def render_show_tab(section: dict, slot: str) -> None:
     _, s_shows_all, _ = _get_saved()
     n_sel    = _sel_count_saved(s_shows_all)
 
-    ca, cb, cc, ci = st.columns([1, 1, 1, 4])
-    with ca:
-        if st.button('All', key=f'show_all_{slot}_{section["key"]}'):
-            for i in items:
-                st.session_state[f'chk_show_{slot}_{i["ratingKey"]}'] = True
-            st.session_state['_saved_shows'] = {
-                i['title']: label_to_mode_cfg(
-                    st.session_state.get(f'mode_show_{slot}_{i["ratingKey"]}', 'Next unwatched'))
-                for i in items}
-            st.session_state['_dirty'] = True
-            st.rerun()
-    with cb:
-        if st.button('None', key=f'show_none_{slot}_{section["key"]}'):
-            for i in items:
-                st.session_state[f'chk_show_{slot}_{i["ratingKey"]}'] = False
-            st.session_state['_saved_shows'] = {}
-            st.session_state['_dirty']       = True
-            st.rerun()
-    with cc:
-        if st.button('Invert', key=f'show_inv_{slot}_{section["key"]}'):
-            for i in items:
-                k = f'chk_show_{slot}_{i["ratingKey"]}'
-                st.session_state[k] = not st.session_state.get(k, False)
-            st.session_state['_saved_shows'] = {
-                i['title']: label_to_mode_cfg(
-                    st.session_state.get(f'mode_show_{slot}_{i["ratingKey"]}', 'Next unwatched'))
-                for i in items
-                if st.session_state.get(f'chk_show_{slot}_{i["ratingKey"]}', False)}
-            st.session_state['_dirty'] = True
-            st.rerun()
-    ci.caption(f'{n_sel} selected · {len(filtered)} shown · {len(items)} total')
+    c_actions, c_info = st.columns([1, 4])
+    with c_actions:
+        with st.popover("☑️ Bulk Actions", use_container_width=True):
+            if st.button('Select All', key=f'show_all_{slot}_{section["key"]}', use_container_width=True):
+                for i in items:
+                    st.session_state[f'chk_show_{slot}_{i["ratingKey"]}'] = True
+                st.session_state['_saved_shows'] = {
+                    i['title']: label_to_mode_cfg(
+                        st.session_state.get(f'mode_show_{slot}_{i["ratingKey"]}', 'Next unwatched'))
+                    for i in items}
+                st.session_state['_dirty'] = True
+                st.rerun()
+            if st.button('Select None', key=f'show_none_{slot}_{section["key"]}', use_container_width=True):
+                for i in items:
+                    st.session_state[f'chk_show_{slot}_{i["ratingKey"]}'] = False
+                st.session_state['_saved_shows'] = {}
+                st.session_state['_dirty']       = True
+                st.rerun()
+            if st.button('Invert Selection', key=f'show_inv_{slot}_{section["key"]}', use_container_width=True):
+                for i in items:
+                    k = f'chk_show_{slot}_{i["ratingKey"]}'
+                    st.session_state[k] = not st.session_state.get(k, False)
+                st.session_state['_saved_shows'] = {
+                    i['title']: label_to_mode_cfg(
+                        st.session_state.get(f'mode_show_{slot}_{i["ratingKey"]}', 'Next unwatched'))
+                    for i in items
+                    if st.session_state.get(f'chk_show_{slot}_{i["ratingKey"]}', False)}
+                st.session_state['_dirty'] = True
+                st.rerun()
+
+    c_info.caption(f'{n_sel} selected · {len(filtered)} shown · {len(items)} total')
 
     page_items, n_pages, page = _pagination_controls(filtered, f'page_show_{section["key"]}')
     if n_pages > 1:
@@ -664,32 +665,32 @@ def render_playlist_tab(slot: str) -> None:
     _, _, s_playlists_all = _get_saved()
     n_sel    = _sel_count_saved(s_playlists_all)
 
-    ca, cb, cc, ci = st.columns([1, 1, 1, 4])
-    with ca:
-        if st.button('All', key=f'pl_all_{slot}'):
-            for p in playlists:
-                st.session_state[f'chk_pl_{slot}_{p["ratingKey"]}'] = True
-            st.session_state['_saved_playlists'] = {p['title'] for p in playlists}
-            st.session_state['_dirty']           = True
-            st.rerun()
-    with cb:
-        if st.button('None', key=f'pl_none_{slot}'):
-            for p in playlists:
-                st.session_state[f'chk_pl_{slot}_{p["ratingKey"]}'] = False
-            st.session_state['_saved_playlists'] = set()
-            st.session_state['_dirty']           = True
-            st.rerun()
-    with cc:
-        if st.button('Invert', key=f'pl_inv_{slot}'):
-            for p in playlists:
-                k = f'chk_pl_{slot}_{p["ratingKey"]}'
-                st.session_state[k] = not st.session_state.get(k, False)
-            st.session_state['_saved_playlists'] = {
-                p['title'] for p in playlists
-                if st.session_state.get(f'chk_pl_{slot}_{p["ratingKey"]}', False)}
-            st.session_state['_dirty'] = True
-            st.rerun()
-    ci.caption(f'{n_sel} selected · {len(playlists)} total')
+    c_actions, c_info = st.columns([1, 4])
+    with c_actions:
+        with st.popover("☑️ Bulk Actions", use_container_width=True):
+            if st.button('Select All', key=f'pl_all_{slot}', use_container_width=True):
+                for p in playlists:
+                    st.session_state[f'chk_pl_{slot}_{p["ratingKey"]}'] = True
+                st.session_state['_saved_playlists'] = {p['title'] for p in playlists}
+                st.session_state['_dirty']           = True
+                st.rerun()
+            if st.button('Select None', key=f'pl_none_{slot}', use_container_width=True):
+                for p in playlists:
+                    st.session_state[f'chk_pl_{slot}_{p["ratingKey"]}'] = False
+                st.session_state['_saved_playlists'] = set()
+                st.session_state['_dirty']           = True
+                st.rerun()
+            if st.button('Invert Selection', key=f'pl_inv_{slot}', use_container_width=True):
+                for p in playlists:
+                    k = f'chk_pl_{slot}_{p["ratingKey"]}'
+                    st.session_state[k] = not st.session_state.get(k, False)
+                st.session_state['_saved_playlists'] = {
+                    p['title'] for p in playlists
+                    if st.session_state.get(f'chk_pl_{slot}_{p["ratingKey"]}', False)}
+                st.session_state['_dirty'] = True
+                st.rerun()
+
+    c_info.caption(f'{n_sel} selected · {len(playlists)} total')
 
     _, _, s_playlists_cur = _get_saved()
     for pl in filtered:
@@ -762,7 +763,7 @@ def _footer() -> None:
 
 def main():
     st.set_page_config(
-        page_title=f'PlexSyncer {VERSION}', page_icon='📡',
+        page_title=f'PlexSyncer {VERSION}', page_icon=APP_ICON,
         layout='wide', initial_sidebar_state='expanded',
     )
 
@@ -773,7 +774,7 @@ def main():
     current_slot = render_sidebar()
 
     if not current_slot:
-        st.title('PlexSyncer')
+        st.title(f'{APP_ICON} PlexSyncer')
         st.info('👈 Create a slot in the sidebar to get started.')
         _footer()
         return
@@ -788,7 +789,7 @@ def main():
         st.session_state['_show_sync'] = True
 
     if st.session_state.get('_show_sync') or '_sync_output' in st.session_state:
-        st.title(f'PlexSyncer  —  {current_slot}')
+        st.title(f'{APP_ICON} PlexSyncer  —  {current_slot}')
         run_sync_live(current_slot)
         _footer()
         return
@@ -798,7 +799,7 @@ def main():
     sync_root = plex_cfg.get('sync_root', DEFAULT_SYNC_ROOT)
     slot_dir  = os.path.join(sync_root, current_slot)
 
-    st.title(f'PlexSyncer  —  {current_slot}')
+    st.title(f'{APP_ICON} PlexSyncer  —  {current_slot}')
     st.caption(f'Sync directory: `{slot_dir}`')
 
     managed = plex_cfg.get('managed_user', '')

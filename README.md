@@ -1,4 +1,4 @@
-# PlexSyncer for Plezy
+# PlexSyncer (Return of the Plex Sync)
 
 > Automated offline media sync from Plex to mobile devices via Syncthing\Rclone and Plezy.
 
@@ -18,14 +18,16 @@
 10. [Subtitle Handling](#10-subtitle-handling)
 11. [Watch State & Pruning Lifecycle](#11-watch-state--pruning-lifecycle)
 12. [Deployment](#12-deployment)
-13. [Open Questions / Future Work](#13-open-questions--future-work)
+13. [Mobile Sync Options](#13-mobile-sync-options)
+14. [Platform Support](#14-platform-support)
+15. [Open Questions / Future Work](#15-open-questions--future-work)
 
 ---
 
 ## 1. Vision
 
 PlexSyncer automates the selection, hard-linking, and cleanup of Plex media content into
-slot-specific directories that Syncthing mirrors to mobile devices. A forked build of
+slot-specific directories that are transferred to mobile devices via rclone, Syncthing, or any file sync tool of your choice. A forked build of
 the Plezy Android app reads a `manifest.json` sidecar to register synced files as
 offline-available without requiring a Plex connection on the phone.
 
@@ -59,12 +61,12 @@ with zero manual file management.
 │      TV Shows/...                                       │
 │      Movies/...                                         │
 └─────────────────┬───────────────────────────────────────┘
-                  │  Syncthing (one-way push, phone is receive-only)
+                  │  rclone / Syncthing / any one-way sync tool
                   ▼
 ┌─────────────────────────────────────────────────────────┐
 │  Android Phone                                          │
 │                                                         │
-│  /storage/.../PlexSyncer/tablet/                          │
+│  /storage/.../PlexSyncer/tablet/                        │
 │    _plezy_meta/manifest.json                            │
 │    TV Shows/...                                         │
 │    Movies/...                                           │
@@ -78,8 +80,8 @@ with zero manual file management.
 └─────────────────────────────────────────────────────────┘
 ```
 
-Syncthing is configured as **one-way push only** (phone is receive-only). There is no
-risk of phone-side changes propagating back to the server.
+The sync tool runs **one-way** (phone is destination only). There is no risk of
+phone-side changes propagating back to the server. See §13 for sync tool options.
 
 ---
 
@@ -92,17 +94,17 @@ risk of phone-side changes propagating back to the server.
 | `plex_hardlink_sync.py` | Python | Core sync worker: hard links, manifest, pruning |
 | `sync_ui.py` | Python / Streamlit | Web UI for slot configuration |
 | Plezy fork | Dart / Flutter | Android app: manifest import, scan button, delete-from-storage |
-| Syncthing | — | File transport, phone is receive-only |
+| rclone / Syncthing | — | File transport to phone (one-way, user-configured) |
 
 ### Slot Model
 
 A **slot** represents one target device/profile. Each slot has its own:
 - Configuration file (`configs/{slot_name}.json`)
 - Sync directory (`sync_root/{slot_name}/`)
-- Syncthing folder target
+- Sync tool target (rclone remote, Syncthing folder, etc.)
 
 This allows independent configurations for e.g. a tablet (kids content) and a phone
-(adult content) from the same Plex server.
+(adult content) from the same Plex server. Each slot is synced independently.
 
 ---
 
@@ -177,7 +179,7 @@ all synced files as completed download records.
   "version": 1,
   "generatedAt": "1997-08-29T02:14:00Z"
   "serverId": "0123456789012345678901234567890123456789",
-  "serverName": "MediaBox",
+  "serverName": "PlexServer",
   "items": [
     {
       "ratingKey": "12345",
@@ -226,13 +228,24 @@ all synced files as completed download records.
 Each slot is stored as `configs/{slot_name}.json`:
 
 ```json
+The Plex connection and sync root live in `configs/plex.json` (written by the UI or created manually):
+
+```json
+{
+  "host": "http://YOUR_SERVER:32400",
+  "token": "YOUR_PLEX_TOKEN",
+  "managed_user": "",
+  "sync_root": "/media/drive/PlexSyncer",
+  "subtitle_languages": ["en"],
+  "subtitle_forced_only": false
+}
+```
+
+Each slot is stored as `configs/{slot_name}.json`:
+
+```json
 {
   "slot_name": "tablet",
-  "plex": {
-    "host": "http://192.168.1.100:32400",
-    "token": "YOUR_PLEX_TOKEN"
-  },
-  "sync_root": "/media/PlexDrive/PlexSyncer",
   "selections": {
     "playlists": ["Kids Car", "Kids Bedtime"],
     "movies": ["Moana", "Encanto"],
@@ -272,10 +285,10 @@ automatically. This is optimal for mobile storage and transfer speed.
 | Correct filename sanitization (mirrors Plezy) | ✅ Done |
 | Lowest-bitrate version picker | ✅ Done |
 | Slot config file support | ✅ Done |
-| `--all-slots` CRON mode | ⬜ TODO |
+| `--all-slots` CRON mode | ✅ Done |
 | Movie support | ✅ Done |
 | TV show "Next X unwatched" support | ✅ Done |
-| Subtitle sidecar hard-linking | ⬜ TODO |
+| Subtitle sidecar hard-linking | ✅ Done |
 | Manifest generation | ✅ Done |
 | Pruning (files not in active config) | ✅ Done |
 | Path collision detection | ✅ Done |
@@ -320,21 +333,57 @@ Bitrate is the primary sort key; file size is the tiebreaker.
 **Framework:** Streamlit  
 **Access:** `http://{server-ip}:8501`
 
-### Status
+### Quick Start (manual)
+
+```bash
+cd /path/to/PlexSyncer
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+streamlit run sync_ui.py
+```
+
+### Install as System Service
+
+```bash
+bash install_service.sh
+```
+
+This creates the venv, installs dependencies, and registers a systemd service
+(`plexsyncer.service`) that starts automatically on boot.
+
+```bash
+bash uninstall_service.sh   # remove service (configs and files untouched)
+```
+
+Manage with:
+```bash
+sudo systemctl status plexsyncer
+sudo systemctl restart plexsyncer
+sudo journalctl -u plexsyncer -f
+```
+
+### Features
 
 | Feature | Status |
 |---|---|
-| Slot selector / creator | ⬜ TODO |
-| Plex connection config | ⬜ TODO |
-| Playlist browser | ⬜ TODO |
-| Movie search & selection | ⬜ TODO |
-| TV show "Next X" selector | ⬜ TODO |
-| Save config | ⬜ TODO |
-| "Save & Sync" trigger button | ⬜ TODO |
+| Slot selector / creator / delete | ✅ Done |
+| Plex connection + managed user | ✅ Done |
+| Library browser (movies, shows, playlists) | ✅ Done |
+| TV show "Next X" sync mode selector | ✅ Done |
+| Unwatched episode count badge | ✅ Done |
+| Bulk select / invert per tab | ✅ Done |
+| Paginated library lists (50/page) | ✅ Done |
+| Live sync list (current selections) | ✅ Done |
+| Unsaved changes indicator | ✅ Done |
+| Save config + Save & Sync | ✅ Done |
+| Live sync output log | ✅ Done |
+| Global settings (sync root, subtitles) | ✅ Done |
 
-> **Sequencing note:** The UI is built last. The worker must be fully validated
-> end-to-end first. The UI is purely a config editor and sync trigger — it adds
-> no new logic.
+### Requirements
+
+Streamlit ≥ 1.31.0 is required for `st.popover` and `st.status`.
+See `requirements.txt`.
 
 ---
 
@@ -354,7 +403,7 @@ A "Scan" button in the Downloads screen triggers a manifest import:
 3. Resolve `relativePath` to a full SAF `content://` URI using the SAF tree root
 4. Insert a new `DownloadedMediaItem` row with `status = completed`
 5. Items in the database that are no longer in the manifest and were imported via
-   scan (flagged `source = syncthing`) are removed from the database
+   scan (flagged `source = plexsyncer`) are removed from the database
 
 **Database fields populated (from `tables.dart → DownloadedMedia`):**
 
@@ -380,7 +429,7 @@ It is a candidate for upstream PR.
 
 ### What Is NOT Changed
 
-- Download logic (Syncthing is the transport, not Plezy)
+- Download logic (rclone/Syncthing is the transport, not Plezy)
 - Watch state sync (unchanged — works as-is)
 - Playback (unchanged — MPV plays SAF `content://` URIs)
 - Thumbnail fetching (unchanged — lazy fetch when online)
@@ -423,11 +472,11 @@ will need subtitle entries.
 
 ```
 1. CRON syncs N unwatched episodes to slot dir
-2. Syncthing pushes to phone
+2. rclone/Syncthing transfers to phone
 3. User watches episode offline in Plezy
 4. Plezy records progress in local OfflineWatchProgress table
 5. Phone comes online
-6. Syncthing syncs any manifest/file changes (phone is receive-only — no risk)
+6. Sync tool transfers any manifest/file changes (one-way — no risk)
 7. User opens Plezy → watch state syncs back to Plex server
 8. Next CRON run:
    a. Plex now shows episode as watched
@@ -435,7 +484,7 @@ will need subtitle entries.
    c. Pruning deletes the hard link
    d. Next unwatched episode is added and linked
    e. Manifest is regenerated
-9. Syncthing pushes updated folder to phone (file deleted, new file added)
+9. rclone/Syncthing transfers updated folder to phone
 10. User taps "Scan" in Plezy → database updated to match new manifest
 ```
 
@@ -453,8 +502,8 @@ behavior — content is never pruned before Plex knows it was watched.
 
 ### What Triggers a Scan in Plezy
 
-The "Scan" button is manual. The user taps it after Syncthing has finished syncing
-a new manifest. This is intentional — automatic background scanning would risk
+The "Scan" button is manual. The user taps it after the sync tool has finished
+transferring the updated manifest. This is intentional — automatic background scanning would risk
 partial-sync states where the manifest is updated but files have not yet arrived.
 
 ---
@@ -464,31 +513,69 @@ partial-sync states where the manifest is updated but files have not yet arrived
 ### Requirements
 
 - Python 3.10+
-- `pip install plexapi requests streamlit`
+- `pip install -r requirements.txt` (or run `bash install_service.sh`)
+- Streamlit ≥ 1.31.0 required
 - `sync_root` must be on the **same filesystem partition** as the Plex media library
   (required for hard links — cross-device links will fail with `errno 18`)
-- Syncthing configured with phone folder as **receive-only**
+- Sync tool configured one-way (phone is destination only)
 
 ### CRON
 
 ```cron
-0 3 * * * /usr/bin/python3 /home/user/GitProjects/PlexSyncer/plex_hardlink_sync.py --all-slots >> /var/log/plexsync.log 2>&1
+0 3 * * * /path/to/PlexSyncer/venv/bin/python /path/to/PlexSyncer/plex_hardlink_sync.py --all-slots >> /var/log/plexsyncer.log 2>&1
 ```
 
-### Syncthing
+### Sync Tool
 
-One Syncthing folder per slot, e.g.:
+PlexSyncer generates slot directories on the server. Getting them to your phone is
+handled separately — see §13 for options.
 
-| Folder ID | Server path | Phone path |
-|---|---|---|
-| `plexsync-tablet` | `/media/drive/PlexSyncer/tablet` | `/storage/.../PlexSyncer/tablet` |
-| `plexsync-phone` | `/media/drive/PlexSyncer/phone` | `/storage/.../PlexSyncer/phone` |
-
-Phone folders set to **Receive Only** — no changes propagate back to server.
+One sync target per slot. Server path: `{sync_root}/{slot_name}/`
 
 ---
 
-## 13. Open Questions / Future Work
+## 13. Mobile Sync Options
+
+PlexSyncer is not opinionated about how files get to your phone. Options:
+
+### rclone + Round Sync (Recommended)
+
+[rclone](https://rclone.org/) on the server with [Round Sync](https://github.com/roundsync/roundsync)
+on Android. Significantly faster than Syncthing for large media files because it
+transfers files directly without per-block checksumming.
+
+```bash
+rclone sync /media/drive/PlexSyncer/MyPhone remote:PlexSyncer/MyPhone --progress
+```
+
+Round Sync on Android can pull from an rclone remote on a schedule.
+
+### Syncthing
+
+[Syncthing](https://syncthing.net/) works but is noticeably slower for large files.
+Configure the phone folder as **Receive Only**. The worker protects `.stfolder` and
+other Syncthing internals from pruning.
+
+### SMB / NFS / USB
+
+Mount the slot directory as a network share and copy manually or with a scheduled task.
+
+---
+
+## 14. Platform Support
+
+| Platform | Worker | UI | Notes |
+|---|---|---|---|
+| **Linux** | ✅ | ✅ | Primary target, fully tested |
+| **macOS** | ✅ | ✅ | `os.link()` native; not tested but expected to work |
+| **Windows** | ⚠️ | ✅ | Hard links require NTFS + admin or Developer Mode; not tested |
+
+Hard links require `sync_root` and the Plex media library to be on the same filesystem
+partition on all platforms.
+
+---
+
+## 15. Open Questions / Future Work
 
 | # | Question | Priority |
 |---|---|---|
@@ -497,5 +584,5 @@ Phone folders set to **Receive Only** — no changes propagate back to server.
 | 3 | Thumbnail strategy: lazy fetch when online is confirmed acceptable. No action needed. | Closed |
 | 4 | Should "Scan" auto-run when Plezy detects a manifest change, or always manual? | Low — manual is safe default |
 | 5 | Managed account (`-u`) support in worker — currently broken due to PlexAPI `NotFound` on display name vs username | Low — not needed for main account workflow |
-| 6 | Streamlit UI — build after worker is fully validated | Deferred |
+| 6 | Streamlit UI | ✅ Complete |
 | 7 | Upstream PR for Change 2 (delete-from-storage) | Deferred until fork is working |
