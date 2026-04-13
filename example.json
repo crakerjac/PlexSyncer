@@ -1,0 +1,31 @@
+{
+  "_comment": "Copy this file to configs/{slot_name}.json and edit to suit.",
+
+  "slot_name": "tablet",
+
+  "plex": {
+    "host":  "http://192.168.1.100:32400",
+    "token": "YOUR_PLEX_TOKEN_HERE"
+  },
+
+  "sync_root": "/media/drive/PlexSync",
+
+  "selections": {
+
+    "playlists": [
+      "Kids Car",
+      "Kids Bedtime"
+    ],
+
+    "movies": [
+      "Moana",
+      "Encanto"
+    ],
+
+    "shows": {
+      "ALF":      { "next": 3 },
+      "The Bear": { "next": 2 }
+    }
+
+  }
+}
