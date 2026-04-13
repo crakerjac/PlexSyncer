@@ -1,4 +1,4 @@
-# PlexSyncer (Return of the Plex Sync)
+# PlexSyncer (Return of the Sync)
 
 > Automated offline media sync from Plex to mobile devices via Syncthing\Rclone and Plezy.
 
