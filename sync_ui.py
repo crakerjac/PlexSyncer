@@ -11,7 +11,7 @@ import os, json, glob, subprocess, sys
 from typing import Optional
 import streamlit as st
 
-VERSION = 'v0.1.17'
+VERSION = 'v0.1.18'
 APP_ICON = '📼'
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))

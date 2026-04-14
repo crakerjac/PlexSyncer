@@ -336,11 +336,14 @@ def build_manifest_entry(item, rel: str,
     if item.TYPE == 'episode':
         year = show_year or getattr(item, 'grandparentYear', None)
         e.update({
-            'grandparentTitle': item.grandparentTitle,
-            'grandparentYear':  year,
-            'parentTitle':      getattr(item, 'parentTitle', None),
-            'seasonNumber':     item.parentIndex,
-            'episodeNumber':    item.index,
+            'grandparentTitle':     item.grandparentTitle,
+            'grandparentYear':      year,
+            'grandparentRatingKey': str(item.grandparentRatingKey) if getattr(item, 'grandparentRatingKey', None) else None,
+            'grandparentThumb':     getattr(item, 'grandparentThumb', None),
+            'parentTitle':          getattr(item, 'parentTitle', None),
+            'parentRatingKey':      str(item.parentRatingKey) if item.parentRatingKey is not None else None,
+            'seasonNumber':         item.parentIndex,
+            'episodeNumber':        item.index,
         })
     elif item.TYPE == 'movie':
         e['year'] = getattr(item, 'year', None)
