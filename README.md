@@ -1,6 +1,6 @@
 # PlexSyncer (Return of the Sync)
 
-> Automated offline media sync from Plex to mobile devices via Syncthing\Rclone and Plezy.
+> Automated offline media sync from Plex to mobile devices via rclone/Syncthing and the Plezy Android app.
 
 ---
 
@@ -27,9 +27,10 @@
 ## 1. Vision
 
 PlexSyncer automates the selection, hard-linking, and cleanup of Plex media content into
-slot-specific directories that are transferred to mobile devices via rclone, Syncthing, or any file sync tool of your choice. A forked build of
-the Plezy Android app reads a `manifest.json` sidecar to register synced files as
-offline-available without requiring a Plex connection on the phone.
+slot-specific directories that are transferred to mobile devices via rclone, Syncthing, or
+any file sync tool of your choice. A forked build of the Plezy Android app reads a
+`manifest.json` sidecar to register synced files as offline-available without requiring a
+Plex connection on the phone.
 
 The goal: curated offline content on a mobile device that stays fresh automatically,
 with zero manual file management.
@@ -55,33 +56,42 @@ with zero manual file management.
 │    - Prunes removed/watched items                  │    │
 │                                                    │    │
 │  /sync_root/                                       │    │
-│    tablet/                ◄────────────────────────┘    │
+│    MyPhone/               ◄────────────────────────┘    │
 │      _plezy_meta/                                       │
 │        manifest.json                                    │
 │      TV Shows/...                                       │
 │      Movies/...                                         │
 └─────────────────┬───────────────────────────────────────┘
-                  │  rclone / Syncthing / any one-way sync tool
+                  │  rclone sync → phone's PlexSyncer folder
                   ▼
 ┌─────────────────────────────────────────────────────────┐
 │  Android Phone                                          │
 │                                                         │
-│  /storage/.../PlexSyncer/tablet/                        │
+│  /storage/.../Plezy/PlexSyncer/                         │
 │    _plezy_meta/manifest.json                            │
 │    TV Shows/...                                         │
 │    Movies/...                                           │
 │         │                                               │
-│         ▼  (user taps "Scan" in Plezy)                  │
+│         ▼  (user taps "Scan" in Plezy fork)             │
 │  Plezy (forked)                                         │
 │    - Reads manifest.json                                │
 │    - Registers files as completed downloads             │
+│    - Fetches artwork from Plex server (when online)     │
 │    - Plays files offline via MPV                        │
 │    - Syncs watch state back to Plex when online         │
+│    - Prunes DB records for files removed by rclone      │
 └─────────────────────────────────────────────────────────┘
 ```
 
 The sync tool runs **one-way** (phone is destination only). There is no risk of
 phone-side changes propagating back to the server. See §13 for sync tool options.
+
+### Physical Separation
+
+PlexSyncer files live in a dedicated `PlexSyncer` subfolder inside the Plezy SAF download
+root. Plezy's own native downloads go to internal app storage. This means rclone can
+sync freely without touching anything Plezy downloaded natively, and Plezy's scan button
+only operates on the `PlexSyncer` folder — it never affects native downloads.
 
 ---
 
@@ -92,30 +102,35 @@ phone-side changes propagating back to the server. See §13 for sync tool option
 | Component | Language | Purpose |
 |---|---|---|
 | `plex_hardlink_sync.py` | Python | Core sync worker: hard links, manifest, pruning |
-| `sync_ui.py` | Python / Streamlit | Web UI for slot configuration |
-| Plezy fork | Dart / Flutter | Android app: manifest import, scan button, delete-from-storage |
-| rclone / Syncthing | — | File transport to phone (one-way, user-configured) |
+| `sync_ui.py` | Python / Streamlit | Web UI for slot configuration and sync triggering |
+| Plezy fork | Dart / Flutter | Android app: manifest import, scan button, artwork fetch |
+| rclone / Round Sync | — | File transport to phone (one-way, user-configured) |
 
 ### Slot Model
 
 A **slot** represents one target device/profile. Each slot has its own:
 - Configuration file (`configs/{slot_name}.json`)
-- Sync directory (`sync_root/{slot_name}/`)
-- Sync tool target (rclone remote, Syncthing folder, etc.)
+- Sync directory on server (`{sync_root}/{slot_name}/`)
+- rclone sync target pointing to `{Plezy SAF root}/PlexSyncer/` on the phone
 
 This allows independent configurations for e.g. a tablet (kids content) and a phone
-(adult content) from the same Plex server. Each slot is synced independently.
+(adult content) from the same Plex server.
+
+### Two-Repo Structure
+
+| Repo | Contents |
+|---|---|
+| `PlexSyncer` (this repo) | Python worker, Streamlit UI, configs, install scripts |
+| [`crakerjac/plezy`](https://github.com/crakerjac/plezy) | Forked Plezy Android app with PlexSyncer integration |
 
 ---
 
 ## 4. File and Path Conventions
 
-Paths **must exactly match** what Plezy's own downloader produces, because the forked
-app uses the same path-resolution logic to play files.
+Paths **must exactly match** what Plezy's own downloader produces. The sanitization rules
+and directory structure are derived from `download_storage_service.dart`.
 
 ### Sanitization Rules
-
-Derived from `download_storage_service.dart → _sanitizeFileName()`:
 
 1. Remove characters: `< > : " / \ | ? *`
 2. Remove leading and trailing dots
@@ -151,7 +166,6 @@ Movies/Dune (2021)/Dune (2021).mp4
 
 ### Subtitle Sidecar Path
 
-Subtitle files sit alongside the video, named:
 ```
 {Video filename base}.{language_code}.{ext}
 ```
@@ -162,22 +176,22 @@ TV Shows/ALF (1986)/Season 01/S01E01 - A_L_F.en.srt
 ```
 
 > **Open question:** Does Plezy's offline mode surface subtitle tracks from sidecar
-> files in its subtitle picker UI? This needs testing before subtitle support is
-> considered complete. MPV (the underlying player) auto-detects sidecars, but Plezy
-> may need to register them in its database. See §10.
+> files in its subtitle picker UI? MPV auto-detects them for playback, but Plezy
+> may need DB registration for them to appear in the subtitle picker. See §10.
 
 ---
 
 ## 5. Manifest Format
 
-The manifest lives at `{slot_dir}/_plezy_meta/manifest.json` and is always fully
-regenerated on each sync run. Plezy reads this file on a manual "Scan" to register
-all synced files as completed download records.
+The manifest lives at `{slot_dir}/_plezy_meta/manifest.json` and is fully regenerated
+on each sync run. The Plezy fork reads this file when the user taps "Scan" to register
+all synced files as completed download records, and uses the manifest to prune DB records
+for files that have since been removed by rclone.
 
 ```json
 {
   "version": 1,
-  "generatedAt": "1997-08-29T02:14:00Z"
+  "generatedAt": "1997-08-29T02:14:00Z",
   "serverId": "0123456789012345678901234567890123456789",
   "serverName": "PlexServer",
   "items": [
@@ -186,13 +200,18 @@ all synced files as completed download records.
       "type": "episode",
       "title": "A.L.F.",
       "thumb": "/library/metadata/12345/thumb",
+      "art": "/library/metadata/12345/art",
       "summary": "ALF accidentally reveals himself to a neighbor...",
       "duration": 1560000,
-      "addedAt": "1997-08-29T02:14:00Z",
       "relativePath": "TV Shows/ALF (1986)/Season 01/S01E01 - A_L_F.mp4",
       "grandparentTitle": "ALF",
       "grandparentYear": 1986,
+      "grandparentRatingKey": "111",
+      "grandparentThumb": "/library/metadata/111/thumb",
+      "grandparentArt": "/library/metadata/111/art",
       "parentTitle": "Season 1",
+      "parentRatingKey": "222",
+      "parentThumb": "/library/metadata/222/thumb",
       "seasonNumber": 1,
       "episodeNumber": 1
     },
@@ -202,33 +221,44 @@ all synced files as completed download records.
       "title": "Dune",
       "year": 2021,
       "thumb": "/library/metadata/67890/thumb",
+      "art": "/library/metadata/67890/art",
       "summary": "A noble family becomes embroiled in a war...",
       "duration": 9360000,
-      "addedAt": "1997-08-29T02:14:00Z",
       "relativePath": "Movies/Dune (2021)/Dune (2021).mp4"
     }
   ]
 }
 ```
 
-### Field Notes
+### Field Reference
 
-| Field | Source | Notes |
+| Field | Types | Purpose |
 |---|---|---|
-| `serverId` | `plex.machineIdentifier` | Must match exactly what Plezy stored at login |
-| `thumb` | `item.thumb` | Server-relative path; Plezy fetches lazily when online |
-| `relativePath` | Generated by script | Relative to slot dir; always forward slashes |
-| `duration` | `item.duration` | Milliseconds, as Plex stores it |
-| `type` | `item.TYPE` | `"episode"` or `"movie"` |
+| `ratingKey` | all | Plex item ID; forms `serverId:ratingKey` global key |
+| `type` | all | `"episode"` or `"movie"` |
+| `title` | all | Display title |
+| `thumb` | all | Server-relative poster path; fetched lazily by Plezy |
+| `art` | all | Server-relative background/banner path; fetched lazily |
+| `summary` | all | Overview text shown on detail screen |
+| `duration` | all | Milliseconds; shown in duration badge |
+| `relativePath` | all | Path relative to slot dir; used to resolve SAF URI |
+| `year` | movie | Release year badge |
+| `grandparentRatingKey` | episode | Show's Plex ID; used for DB queries and artwork |
+| `grandparentTitle` | episode | Show title |
+| `grandparentThumb` | episode | Show poster path |
+| `grandparentArt` | episode | Show background/banner path |
+| `grandparentYear` | episode | Show year (for show stub metadata) |
+| `parentRatingKey` | episode | Season's Plex ID |
+| `parentTitle` | episode | Season title |
+| `parentThumb` | episode | Season poster path |
+| `seasonNumber` | episode | Season number (parentIndex) |
+| `episodeNumber` | episode | Episode number within season |
 
 ---
 
 ## 6. Configuration Slots
 
-Each slot is stored as `configs/{slot_name}.json`:
-
-```json
-The Plex connection and sync root live in `configs/plex.json` (written by the UI or created manually):
+The Plex connection and sync root live in `configs/plex.json`:
 
 ```json
 {
@@ -245,13 +275,13 @@ Each slot is stored as `configs/{slot_name}.json`:
 
 ```json
 {
-  "slot_name": "tablet",
+  "slot_name": "MyPhone",
   "selections": {
     "playlists": ["Kids Car", "Kids Bedtime"],
     "movies": ["Moana", "Encanto"],
     "shows": {
-      "ALF": { "next": 3 },
-      "The Bear": { "next": 2 }
+      "ALF": { "mode": "next_unwatched", "count": 3 },
+      "The Bear": { "mode": "next_unwatched", "count": 2 }
     }
   }
 }
@@ -259,16 +289,15 @@ Each slot is stored as `configs/{slot_name}.json`:
 
 The slot's sync directory is `{sync_root}/{slot_name}/`.
 
-### Selection Types
+### Show Sync Modes
 
-| Type | Behavior |
+| Config | Behavior |
 |---|---|
-| `playlists` | Sync all items in the named Plex playlist |
-| `movies` | Sync a specific movie by title |
-| `shows` | Sync the next N **unwatched** episodes of a show |
+| `{"mode": "all"}` | All episodes |
+| `{"mode": "latest", "count": N}` | N most-recently aired episodes |
+| `{"mode": "next_unwatched", "count": N}` | Next N unwatched episodes |
 
-Version selection across all types: **lowest bitrate** (smallest file) is always chosen
-automatically. This is optimal for mobile storage and transfer speed.
+Version selection: **lowest bitrate** (smallest file) is always chosen automatically.
 
 ---
 
@@ -289,7 +318,7 @@ automatically. This is optimal for mobile storage and transfer speed.
 | Movie support | ✅ Done |
 | TV show "Next X unwatched" support | ✅ Done |
 | Subtitle sidecar hard-linking | ✅ Done |
-| Manifest generation | ✅ Done |
+| Manifest generation (all artwork fields) | ✅ Done |
 | Pruning (files not in active config) | ✅ Done |
 | Path collision detection | ✅ Done |
 
@@ -297,7 +326,7 @@ automatically. This is optimal for mobile storage and transfer speed.
 
 Single slot (manual):
 ```bash
-python3 plex_hardlink_sync.py --slot tablet
+python3 plex_hardlink_sync.py --slot MyPhone
 ```
 
 All slots (CRON):
@@ -310,7 +339,7 @@ Legacy playlist mode (still supported for testing):
 python3 plex_hardlink_sync.py \
   --host "http://192.168.1.100:32400" \
   --token "YOUR_TOKEN" \
-  --sync-dir "/media/drive/PlexSyncer/tablet" \
+  --sync-dir "/media/drive/PlexSyncer/MyPhone" \
   -p "Kids Car" -p "Kids Bedtime"
 ```
 
@@ -329,8 +358,8 @@ Bitrate is the primary sort key; file size is the tiebreaker.
 
 ## 8. Management UI
 
-**File:** `sync_ui.py`  
-**Framework:** Streamlit  
+**File:** `sync_ui.py`
+**Framework:** Streamlit ≥ 1.31.0
 **Access:** `http://{server-ip}:8501`
 
 ### Quick Start (manual)
@@ -389,50 +418,56 @@ See `requirements.txt`.
 
 ## 9. Plezy Fork
 
-**Repository:** Fork of [edde746/plezy](https://github.com/edde746/plezy)  
-**Target platform:** Android only (initial)  
-**Upstream PR potential:** Delete-from-storage (Change 2) may be suitable upstream.
+**Repository:** [`crakerjac/plezy`](https://github.com/crakerjac/plezy) — fork of [`edde746/plezy`](https://github.com/edde746/plezy)
+**Version tag:** `+PlexSyncer` build suffix in `pubspec.yaml`
+**Target platform:** Android
 
-### Change 1 — Manifest Import / Scan Button
+All PlexSyncer-specific changes are marked with `// PlexSyncer` comments for easy
+identification during upstream rebases.
 
-A "Scan" button in the Downloads screen triggers a manifest import:
+### Changed Files
 
-1. Read `_plezy_meta/manifest.json` from the configured SAF folder root
-2. For each item, check if `serverId:ratingKey` already exists in the
-   `DownloadedMedia` table — skip if so
-3. Resolve `relativePath` to a full SAF `content://` URI using the SAF tree root
-4. Insert a new `DownloadedMediaItem` row with `status = completed`
-5. Items in the database that are no longer in the manifest and were imported via
-   scan (flagged `source = plexsyncer`) are removed from the database
+| File | Type | Change |
+|---|---|---|
+| `lib/services/manifest_import_service.dart` | **New** | SAF reader, JSON parser, URI resolver |
+| `lib/services/download_manager_service.dart` | Modified | `registerSyncedDownload()`, `registerSyncedParentStub()` |
+| `lib/providers/download_provider.dart` | Modified | `importFromManifest()`, `ImportSummary`, prune loop |
+| `lib/screens/downloads/downloads_screen.dart` | Modified | Scan button in Downloads app bar |
+| `pubspec.yaml` | Modified | `+PlexSyncer` version suffix |
 
-**Database fields populated (from `tables.dart → DownloadedMedia`):**
+### How It Works
 
-| Field | Value |
-|---|---|
-| `serverId` | from manifest |
-| `ratingKey` | from manifest |
-| `globalKey` | `"{serverId}:{ratingKey}"` |
-| `type` | from manifest |
-| `status` | `3` (completed) |
-| `progress` | `100` |
-| `videoFilePath` | resolved SAF `content://` URI |
-| `thumbPath` | `null` initially (fetched lazily when online) |
-| `downloadedAt` | current timestamp |
+**Scan button** appears in the Downloads screen app bar whenever a SAF download folder
+is configured in Plezy settings. Tapping it:
 
-### Change 2 — Delete from Storage on Download Delete
+1. Reads `{SAF root}/PlexSyncer/_plezy_meta/manifest.json`
+2. For each item in the manifest, resolves the `relativePath` to a SAF `content://` URI
+   by walking the SAF tree from the `PlexSyncer` folder root
+3. Skips items already registered in the database (idempotent)
+4. Registers new items as completed downloads with full metadata
+5. Fetches artwork from the Plex server immediately (if online), including show poster
+   and background banner — deduplicates show artwork to one fetch per show
+6. Prunes DB records for files that were in the PlexSyncer folder on a previous scan
+   but are no longer in the manifest (removed by rclone / watched and rotated out)
 
-When the user deletes a download in Plezy, the underlying file is also deleted from
-phone storage via SAF. Currently Plezy only removes the database record.
+**Pruning without a source column:** PlexSyncer items are identified by their SAF URI —
+all files registered by the scan have a `content://` URI whose document ID starts with
+the `PlexSyncer` folder's document ID. This uniquely identifies them without any DB
+schema changes, preserving full compatibility with upstream Plezy.
 
-This change is self-contained and does not depend on the manifest/scan feature.
-It is a candidate for upstream PR.
+### Setup
 
-### What Is NOT Changed
+1. In Plezy → Settings → Downloads, set a custom download folder pointing to your
+   desired SAF root (e.g. `/Plezy/`)
+2. Configure rclone to sync the PlexSyncer slot directory to
+   `{SAF root}/PlexSyncer/` on the phone
+3. After rclone completes, tap the scan button (↻) in the Downloads tab
 
-- Download logic (rclone/Syncthing is the transport, not Plezy)
-- Watch state sync (unchanged — works as-is)
-- Playback (unchanged — MPV plays SAF `content://` URIs)
-- Thumbnail fetching (unchanged — lazy fetch when online)
+### Upstream Compatibility
+
+No database schema changes. No `build_runner` required. The changes are additive and
+isolated — rebasing onto a new upstream Plezy version requires merging only the
+four modified files listed above.
 
 ---
 
@@ -453,58 +488,47 @@ for stream in part.subtitleStreams():
 
 ### Open Question — Plezy Subtitle Registration
 
-MPV auto-detects sidecar subtitle files by filename convention, so **playback should
-work**. However it is not yet confirmed whether:
-
-- Plezy's subtitle picker UI lists sidecar files for offline downloads
-- Plezy requires subtitle files to be registered in its database to appear in the UI
+MPV auto-detects sidecar subtitle files by filename convention, so playback should work.
+However it is not yet confirmed whether Plezy's subtitle picker UI lists sidecar files
+for offline downloads, or whether they need to be registered in the database.
 
 **Test required:** Manually place a `.en.srt` sidecar next to a downloaded episode on
-the phone and verify the subtitle picker shows it in Plezy before building the
-linking logic. If registration is needed, the manifest format and Dart import code
-will need subtitle entries.
+the phone and check the subtitle picker in Plezy before investing further.
 
 ---
 
 ## 11. Watch State & Pruning Lifecycle
 
-### Happy Path (Episode Watched Offline)
-
 ```
-1. CRON syncs N unwatched episodes to slot dir
-2. rclone/Syncthing transfers to phone
-3. User watches episode offline in Plezy
-4. Plezy records progress in local OfflineWatchProgress table
-5. Phone comes online
-6. Sync tool transfers any manifest/file changes (one-way — no risk)
-7. User opens Plezy → watch state syncs back to Plex server
-8. Next CRON run:
-   a. Plex now shows episode as watched
-   b. Worker drops it from "Next X" queue
-   c. Pruning deletes the hard link
-   d. Next unwatched episode is added and linked
-   e. Manifest is regenerated
-9. rclone/Syncthing transfers updated folder to phone
-10. User taps "Scan" in Plezy → database updated to match new manifest
+1.  CRON syncs N unwatched episodes to slot dir
+2.  rclone transfers to phone (PlexSyncer subfolder)
+3.  User taps Scan in Plezy → files registered as completed downloads
+4.  User watches episode offline in Plezy
+5.  Plezy records progress locally (OfflineWatchProgress table)
+6.  Phone comes online
+7.  User opens Plezy → watch state syncs back to Plex server
+8.  Next CRON run:
+    a. Plex now shows episode as watched
+    b. Worker drops it from "Next X" queue
+    c. Pruning deletes the server-side hard link
+    d. Next unwatched episode is linked
+    e. Manifest is regenerated
+9.  rclone transfers updated folder to phone (old file gone, new file added)
+10. User taps Scan → new items registered, watched item pruned from DB
 ```
 
-### Timing Gap Behavior
+### Timing Safety
 
-There is an intentional gap between step 3 (watched offline) and step 7 (synced to
-Plex). During this gap, if CRON runs:
+The CRON only prunes based on Plex watch state. If the user watched something offline
+but hasn't synced back to Plex yet, Plex still shows it as unwatched → it stays in the
+queue → it is NOT pruned prematurely. Content is never removed before Plex knows it
+was watched.
 
-- The episode is still marked unwatched in Plex
-- The worker keeps it in the queue
-- No files are pruned prematurely
+### Scan Prune Safety
 
-The gap only closes when the user opens Plezy while online. This is acceptable
-behavior — content is never pruned before Plex knows it was watched.
-
-### What Triggers a Scan in Plezy
-
-The "Scan" button is manual. The user taps it after the sync tool has finished
-transferring the updated manifest. This is intentional — automatic background scanning would risk
-partial-sync states where the manifest is updated but files have not yet arrived.
+The Plezy scan only removes DB records for items whose `videoFilePath` is a SAF URI
+under the `PlexSyncer` folder. Native Plezy downloads (internal storage or other SAF
+locations) are never touched, regardless of what's in the manifest.
 
 ---
 
@@ -514,10 +538,9 @@ partial-sync states where the manifest is updated but files have not yet arrived
 
 - Python 3.10+
 - `pip install -r requirements.txt` (or run `bash install_service.sh`)
-- Streamlit ≥ 1.31.0 required
+- Streamlit ≥ 1.31.0
 - `sync_root` must be on the **same filesystem partition** as the Plex media library
-  (required for hard links — cross-device links will fail with `errno 18`)
-- Sync tool configured one-way (phone is destination only)
+  (required for hard links — cross-device links fail with `errno 18`)
 
 ### CRON
 
@@ -527,25 +550,26 @@ partial-sync states where the manifest is updated but files have not yet arrived
 
 ### Sync Tool
 
-PlexSyncer generates slot directories on the server. Getting them to your phone is
+PlexSyncer generates slot directories on the server. Getting them to the phone is
 handled separately — see §13 for options.
 
-One sync target per slot. Server path: `{sync_root}/{slot_name}/`
+Server path per slot: `{sync_root}/{slot_name}/`
+Phone destination: `{Plezy SAF root}/PlexSyncer/` (configure in your sync tool)
 
 ---
 
 ## 13. Mobile Sync Options
 
-PlexSyncer is not opinionated about how files get to your phone. Options:
+PlexSyncer is not opinionated about how files get to your phone.
 
 ### rclone + Round Sync (Recommended)
 
 [rclone](https://rclone.org/) on the server with [Round Sync](https://github.com/roundsync/roundsync)
-on Android. Significantly faster than Syncthing for large media files because it
-transfers files directly without per-block checksumming.
+on Android. Significantly faster than Syncthing for large media files.
 
 ```bash
-rclone sync /media/drive/PlexSyncer/MyPhone remote:PlexSyncer/MyPhone --progress
+# Example: sync slot to phone's PlexSyncer folder
+rclone sync /media/drive/PlexSyncer/MyPhone remote:/Plezy/PlexSyncer --progress
 ```
 
 Round Sync on Android can pull from an rclone remote on a schedule.
@@ -577,12 +601,10 @@ partition on all platforms.
 
 ## 15. Open Questions / Future Work
 
-| # | Question | Priority |
+| # | Item | Priority |
 |---|---|---|
-| 1 | Do subtitle sidecars appear in Plezy's subtitle picker without DB registration? | High — needed before subtitle work starts |
-| 2 | Does Plezy require `ApiCache` entries (metadata JSON) in addition to `DownloadedMedia` rows for full offline display? | High — needed before Dart work starts |
-| 3 | Thumbnail strategy: lazy fetch when online is confirmed acceptable. No action needed. | Closed |
-| 4 | Should "Scan" auto-run when Plezy detects a manifest change, or always manual? | Low — manual is safe default |
-| 5 | Managed account (`-u`) support in worker — currently broken due to PlexAPI `NotFound` on display name vs username | Low — not needed for main account workflow |
-| 6 | Streamlit UI | ✅ Complete |
-| 7 | Upstream PR for Change 2 (delete-from-storage) | Deferred until fork is working |
+| 1 | Subtitle sidecar visibility in Plezy's offline subtitle picker | High |
+| 2 | Automatic Scan after Round Sync completes (broadcast intent?) | Low — manual is safe for now |
+| 3 | macOS testing | Low |
+| 4 | Windows hard link support (privilege check + fallback) | Low |
+| 5 | Upstream PR to Plezy for the scan / manifest import feature | Deferred |
