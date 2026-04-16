@@ -43,6 +43,8 @@ from plexapi.video import Show
 
 SUBTITLE_EXTS   = {'.srt', '.vtt', '.ass', '.ssa', '.sub'}
 PROTECTED_NAMES = {'_plezy_meta', '.stfolder', '.stversions', '.stignore'}
+
+# Subfolder within each slot directory that contains PlexSyncer-managed files.
 CONFIGS_DIR     = os.path.join(os.path.dirname(__file__), 'configs')
 PLEX_CONFIG     = os.path.join(CONFIGS_DIR, 'plex.json')
 
@@ -328,9 +330,9 @@ def build_manifest_entry(item, rel: str,
         'type':         item.TYPE,
         'title':        item.title,
         'thumb':        getattr(item, 'thumb', None),
+        'art':          getattr(item, 'art', None),
         'summary':      getattr(item, 'summary', '') or '',
         'duration':     getattr(item, 'duration', 0) or 0,
-        'addedAt':      datetime.now(timezone.utc).isoformat(),
         'relativePath': rel.replace(os.sep, '/'),
     }
     if item.TYPE == 'episode':
@@ -340,8 +342,10 @@ def build_manifest_entry(item, rel: str,
             'grandparentYear':      year,
             'grandparentRatingKey': str(item.grandparentRatingKey) if getattr(item, 'grandparentRatingKey', None) else None,
             'grandparentThumb':     getattr(item, 'grandparentThumb', None),
+            'grandparentArt':       getattr(item, 'grandparentArt', None),
             'parentTitle':          getattr(item, 'parentTitle', None),
             'parentRatingKey':      str(item.parentRatingKey) if item.parentRatingKey is not None else None,
+            'parentThumb':          getattr(item, 'parentThumb', None),
             'seasonNumber':         item.parentIndex,
             'episodeNumber':        item.index,
         })
@@ -584,6 +588,7 @@ def run_legacy(args) -> None:
     if total == 0:
         print('Nothing to sync.')
         return
+    # Legacy mode uses --sync-dir directly (no PlexSyncer subfolder added)
     sync_slot_dir(args.sync_dir, all_items, server_id, server_name)
     print('\nSync complete.')
 
