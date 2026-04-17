@@ -1,27 +1,22 @@
 """
-sync_ui.py  —  PlexSyncer Management UI
-https://github.com/your-repo/plexsyncer
+sync_ui.py  —  PlexSyncer Management UI  (cart + search layout)
+Drop-in replacement. Same config files, same worker invocation.
 
-Run:
-    pip install streamlit plexapi requests
-    streamlit run sync_ui.py
+pip install "streamlit>=1.34" plexapi
+streamlit run sync_ui.py
 """
 
 import os, json, glob, subprocess, sys
 from typing import Optional
 import streamlit as st
 
-VERSION = 'v0.1.18'
-APP_ICON = '📼'
-
+VERSION     = 'v1.0.0'
+APP_ICON    = '📼'
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 CONFIGS_DIR = os.path.join(SCRIPT_DIR, 'configs')
 PLEX_CONFIG = os.path.join(CONFIGS_DIR, 'plex.json')
 WORKER      = os.path.join(SCRIPT_DIR, 'plex_hardlink_sync.py')
 os.makedirs(CONFIGS_DIR, exist_ok=True)
-
-DEFAULT_SYNC_ROOT = '/media/drive/PlexSync'
-PAGE_SIZE = 50
 
 SYNC_MODE_LABELS = [
     "All episodes",
@@ -64,22 +59,40 @@ def label_to_mode_cfg(label: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CONFIG I/O
+# CONFIG I/O  —  unchanged format, backward compatible
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_plex_config() -> dict:
+    """Read plex.json from disk. Use get_plex_config() during rendering."""
     defaults = {
-        'host':                 'http://192.168.1.100:32400',
+        'host':                 'http://localhost:32400',
         'token':                '',
         'managed_user':         '',
-        'sync_root':            DEFAULT_SYNC_ROOT,
+        'sync_root':            '',
         'subtitle_languages':   ['en'],
         'subtitle_forced_only': False,
+        'hidden_libraries':     [],
     }
     if os.path.exists(PLEX_CONFIG):
         with open(PLEX_CONFIG, encoding='utf-8') as f:
             defaults.update(json.load(f))
     return defaults
+
+def get_plex_config() -> dict:
+    """
+    Session-cached config. Avoids repeated disk reads during a single render.
+    Invalidated by _invalidate_config_cache() after any settings save.
+    """
+    if '_plex_cfg_cache' not in st.session_state:
+        st.session_state['_plex_cfg_cache'] = load_plex_config()
+    return st.session_state['_plex_cfg_cache']
+
+def _invalidate_config_cache() -> None:
+    st.session_state.pop('_plex_cfg_cache', None)
+    # Dir-size walk results depend on sync_root, so invalidate those too
+    for key in list(st.session_state.keys()):
+        if key.startswith('_dir_size_'):
+            del st.session_state[key]
 
 def save_plex_config(cfg: dict) -> None:
     os.makedirs(CONFIGS_DIR, exist_ok=True)
@@ -131,7 +144,7 @@ def _apply_managed_user() -> None:
     admin = st.session_state.get('plex_admin')
     if admin is None:
         return
-    managed = load_plex_config().get('managed_user', '').strip()
+    managed = get_plex_config().get('managed_user', '').strip()
     if managed:
         try:
             st.session_state['plex_browse'] = admin.switchUser(managed)
@@ -139,6 +152,20 @@ def _apply_managed_user() -> None:
         except Exception:
             pass
     st.session_state['plex_browse'] = admin
+
+def auto_connect() -> None:
+    """Run once per session. Connects silently using stored config."""
+    if 'autoconnect_done' in st.session_state:
+        return
+    st.session_state['autoconnect_done'] = True
+    # Read directly from disk — session cache doesn't exist yet at startup
+    cfg = load_plex_config()
+    if not cfg.get('token'):
+        return
+    ok, msg = try_connect(cfg['host'], cfg['token'])
+    if ok:
+        st.session_state['_startup_toast'] = ('✅', f'Connected to {msg}')
+    # Silently ignore connection failures on startup — user can fix in settings
 
 def get_home_users() -> list:
     if 'home_users' in st.session_state:
@@ -154,6 +181,11 @@ def get_home_users() -> list:
         st.session_state['home_users'] = []
         return []
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LIBRARY CACHE
+# ══════════════════════════════════════════════════════════════════════════════
+
 def get_sections() -> list:
     if 'plex_sections' in st.session_state:
         return st.session_state['plex_sections']
@@ -168,6 +200,10 @@ def get_sections() -> list:
     st.session_state['plex_sections'] = sections
     return sections
 
+def get_visible_sections() -> list:
+    hidden = set(get_plex_config().get('hidden_libraries', []))
+    return [s for s in get_sections() if s['title'] not in hidden]
+
 def get_section_items(section_key) -> list:
     cache_key = f'section_items_{section_key}'
     if cache_key in st.session_state:
@@ -177,7 +213,7 @@ def get_section_items(section_key) -> list:
         return []
     section = plex.library.sectionByID(section_key)
     if section.type == 'show':
-        raw = section.searchShows()
+        raw   = section.searchShows()
         items = sorted(
             [{'title':          i.title,
               'year':           getattr(i, 'year', None),
@@ -187,14 +223,17 @@ def get_section_items(section_key) -> list:
             key=lambda x: x['title'].lower()
         )
     else:
-        raw = section.all()
+        raw   = section.all()
         items = sorted(
-            [{'title': i.title, 'year': getattr(i, 'year', None),
+            [{'title':     i.title,
+              'year':      getattr(i, 'year', None),
               'ratingKey': str(i.ratingKey)}
              for i in raw],
             key=lambda x: x['title'].lower()
         )
     st.session_state[cache_key] = items
+    # Invalidate rk_index so it gets rebuilt with the new items
+    st.session_state.pop('_rk_index', None)
     return items
 
 def get_playlists() -> list:
@@ -213,8 +252,27 @@ def get_playlists() -> list:
 
 def _invalidate_library_cache() -> None:
     for key in list(st.session_state.keys()):
-        if key.startswith('section_items_') or key in ('plex_sections', 'plex_playlists'):
+        if key.startswith('section_items_') or key in (
+                'plex_sections', 'plex_playlists', '_rk_index'):
             del st.session_state[key]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RATING KEY INDEX
+# Lazy O(1) title→ratingKey lookup. Built once from cached section items,
+# rebuilt automatically after library cache invalidation.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _get_rk_index() -> dict:
+    """Returns {(title, item_type): ratingKey} for all cached section items."""
+    if '_rk_index' in st.session_state:
+        return st.session_state['_rk_index']
+    idx = {}
+    for section in get_sections():
+        for item in st.session_state.get(f'section_items_{section["key"]}', []):
+            idx[(item['title'], section['type'])] = item['ratingKey']
+    st.session_state['_rk_index'] = idx
+    return idx
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -226,10 +284,10 @@ def _invalidate_library_cache() -> None:
 # _dirty           : bool — True when unsaved changes exist
 #
 # KEY INVARIANT: on_change callbacks update _saved_* IMMEDIATELY whenever any
-# checkbox or selectbox changes. This means even if Streamlit deletes the
-# widget key (e.g. when paginating away from a page), _saved_* already has
-# the correct value. build_selections_from_widgets() can safely fall back to
-# _saved_* for any item whose key is absent.
+# checkbox or selectbox changes. This means even if Streamlit re-renders
+# a widget (e.g. when switching tabs), _saved_* already has the correct value.
+# build_selections_from_widgets() can safely fall back to _saved_* for any
+# item whose widget key is absent.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_saved() -> tuple:
@@ -270,16 +328,14 @@ def _on_mode_change(rk: str, title: str, slot: str) -> None:
     st.session_state['_dirty']       = True
 
 def _on_playlist_change(rk: str, title: str, slot: str) -> None:
-    checked          = st.session_state.get(f'chk_pl_{slot}_{rk}', False)
-    saved_playlists  = st.session_state.get('_saved_playlists', set())
+    checked         = st.session_state.get(f'chk_pl_{slot}_{rk}', False)
+    saved_playlists = st.session_state.get('_saved_playlists', set())
     if checked:
         saved_playlists.add(title)
     else:
         saved_playlists.discard(title)
     st.session_state['_saved_playlists'] = saved_playlists
     st.session_state['_dirty']           = True
-
-
 
 def switch_slot(slot: str) -> None:
     """
@@ -300,11 +356,10 @@ def build_selections_from_widgets(slot: str) -> dict:
     For each item: use widget key if present, else fall back to _saved_*.
     _saved_* is always current because on_change callbacks update it
     immediately on every interaction — so the fallback is always correct
-    even for off-screen paginated items.
+    even for items on other tabs whose widget keys may not exist yet.
     """
     s_movies, s_shows, s_playlists = _get_saved()
     movies, shows, playlists       = {}, {}, {}
-
     for section in get_sections():
         items = st.session_state.get(f'section_items_{section["key"]}', [])
         for item in items:
@@ -322,393 +377,436 @@ def build_selections_from_widgets(slot: str) -> dict:
                             st.session_state.get(mode, 'Next unwatched'))
                 elif title in s_shows:
                     shows[title] = s_shows[title]
-
     for pl in st.session_state.get('plex_playlists', []):
         rk, title = pl['ratingKey'], pl['title']
         chk = f'chk_pl_{slot}_{rk}'
         playlists[title] = st.session_state[chk] if chk in st.session_state \
                            else (title in s_playlists)
-
     return {
         'movies':    sorted(t for t, v in movies.items()    if v),
         'shows':     shows,
         'playlists': sorted(t for t, v in playlists.items() if v),
     }
 
+# ── Cart removal helpers ──────────────────────────────────────────────────────
+
+def _find_rk(title: str, item_type: str) -> Optional[str]:
+    """O(1) ratingKey lookup via the cached index."""
+    return _get_rk_index().get((title, item_type))
+
+def remove_from_cart(title: str, item_type: str, slot: str) -> None:
+    if item_type == 'movie':
+        saved = st.session_state.get('_saved_movies', set())
+        saved.discard(title)
+        st.session_state['_saved_movies'] = saved
+        rk = _find_rk(title, 'movie')
+        if rk:
+            st.session_state[f'chk_mov_{slot}_{rk}'] = False
+    elif item_type == 'show':
+        saved = st.session_state.get('_saved_shows', {})
+        saved.pop(title, None)
+        st.session_state['_saved_shows'] = saved
+        rk = _find_rk(title, 'show')
+        if rk:
+            st.session_state[f'chk_show_{slot}_{rk}'] = False
+    elif item_type == 'playlist':
+        saved = st.session_state.get('_saved_playlists', set())
+        saved.discard(title)
+        st.session_state['_saved_playlists'] = saved
+        for pl in st.session_state.get('plex_playlists', []):
+            if pl['title'] == title:
+                st.session_state[f'chk_pl_{slot}_{pl["ratingKey"]}'] = False
+    st.session_state['_dirty'] = True
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR
+# SETTINGS DIALOG
+# Requires Streamlit >= 1.34.  All settings in one place, tabbed.
 # ══════════════════════════════════════════════════════════════════════════════
 
-def render_sidebar() -> Optional[str]:
-    with st.sidebar:
-        st.title(f'{APP_ICON} PlexSyncer')
-        st.divider()
+@st.dialog(f"{APP_ICON}  Settings", width="large")
+def show_settings() -> None:
+    plex_cfg = get_plex_config()
 
-        # ── 1. Plex connection ────────────────────────────────────────────────
-        st.subheader('Plex Connection')
-        plex_cfg = load_plex_config()
-        host  = st.text_input('Host',  value=plex_cfg['host'],  key='cfg_host')
-        token = st.text_input('Token', value=plex_cfg['token'], key='cfg_token',
-                              type='password')
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button('Connect', use_container_width=True):
-                with st.spinner('Connecting...'):
-                    ok, msg = try_connect(host, token)
-                if ok:
-                    st.toast(f'✓ Connected to {msg}', icon='✅')
-                else:
-                    st.error(f'✗ {msg}')
-        with c2:
-            if st.button('Refresh', use_container_width=True):
-                _invalidate_library_cache()
-                st.rerun()
+    tab_conn, tab_sync, tab_libs, tab_slots = st.tabs(
+        ["Plex Connection", "Sync Settings", "Libraries", "Slots"]
+    )
 
-        browse = get_browse_plex()
-        admin  = st.session_state.get('plex_admin')
-        if browse:
-            st.caption(f'✓ Connected: **{admin.friendlyName}**')
-            home_users = get_home_users()
-            if home_users:
-                options  = ['(main account)'] + home_users
-                saved    = plex_cfg.get('managed_user', '')
-                def_i    = options.index(saved) if saved in options else 0
-                st.selectbox('Browse as user', options, index=def_i,
-                             key='cfg_managed_user')
+    # ── Plex Connection ───────────────────────────────────────────────────────
+    with tab_conn:
+        st.text_input(
+            "Host", value=plex_cfg.get('host', 'http://localhost:32400'),
+            key='sdlg_host',
+            help="Usually doesn't need changing — PlexSyncer must run on the same machine as Plex"
+        )
+        st.text_input(
+            "Plex Token", value='', type='password',
+            key='sdlg_token',
+            placeholder='Leave blank to keep existing token' if plex_cfg.get('token') else 'Enter your Plex token',
+            help="Plex Web → Settings → Troubleshooting → Show secret token"
+        )
+        if plex_cfg.get('token'):
+            st.caption("Token is already configured.")
+
+        home_users    = get_home_users()
+        managed_opts  = ['(main account)'] + home_users
+        saved_managed = plex_cfg.get('managed_user', '')
+        managed_idx   = managed_opts.index(saved_managed) if saved_managed in managed_opts else 0
+        st.selectbox("Browse as user", managed_opts, index=managed_idx, key='sdlg_managed')
+
+        c1, c2 = st.columns([1, 3])
+        if c1.button("Test Connection", key='sdlg_test', use_container_width=True):
+            test_token = st.session_state.get('sdlg_token', '').strip() or plex_cfg.get('token', '')
+            with st.spinner("Testing…"):
+                ok, msg = try_connect(st.session_state['sdlg_host'], test_token)
+            if ok:
+                c2.success(f"✓ Connected to {msg}")
             else:
-                st.session_state['cfg_managed_user'] = '(main account)'
-                st.caption('No Plex Home managed users found.')
+                c2.error(f"✗ {msg}")
+        elif get_browse_plex():
+            admin = st.session_state.get('plex_admin')
+            c2.caption(f"Currently connected: **{admin.friendlyName}**")
+
+    # ── Sync Settings ─────────────────────────────────────────────────────────
+    with tab_sync:
+        st.text_input(
+            "Sync root directory",
+            value=plex_cfg.get('sync_root', ''),
+            key='sdlg_sync_root',
+            placeholder='/media/drive/PlexSyncer',
+            help="Must be on the same filesystem partition as your Plex media library (required for hard links)"
+        )
+        st.text_input(
+            "Subtitle languages",
+            value=', '.join(plex_cfg.get('subtitle_languages', ['en'])),
+            key='sdlg_sub_langs',
+            placeholder='en, es  — or  all'
+        )
+        st.checkbox(
+            "Forced subtitles only",
+            value=plex_cfg.get('subtitle_forced_only', False),
+            key='sdlg_sub_forced'
+        )
+
+    # ── Libraries ─────────────────────────────────────────────────────────────
+    with tab_libs:
+        st.caption("Hidden libraries won't appear as tabs or in search results. Does not affect the worker.")
+        sections = get_sections()
+        if not sections:
+            st.info("Connect to Plex first to see your libraries.")
         else:
-            st.caption('⚠ Not connected')
-            st.session_state['cfg_managed_user'] = '(main account)'
+            hidden = set(plex_cfg.get('hidden_libraries', []))
+            for section in sections:
+                st.toggle(
+                    f"{section['title']}  —  {section['type']}",
+                    value=section['title'] not in hidden,
+                    key=f'sdlg_libvis_{section["key"]}'
+                )
 
-        st.divider()
-
-        # ── 2. Slots ──────────────────────────────────────────────────────────
-        st.subheader('Slots')
+    # ── Slots ─────────────────────────────────────────────────────────────────
+    with tab_slots:
         slots = list_slots()
         if slots:
-            current_slot = st.selectbox('Active slot', slots,
-                                        key='active_slot_select')
+            st.caption(f"{len(slots)} slot{'s' if len(slots) != 1 else ''} configured")
+            for s in slots:
+                c1, c2 = st.columns([6, 1])
+                c1.write(s)
+                if c2.button("🗑", key=f'sdlg_del_{s}', help=f'Delete slot "{s}"'):
+                    os.remove(os.path.join(CONFIGS_DIR, f'{s}.json'))
+                    # Clear _loaded_slot so the deleted slot isn't re-loaded
+                    if st.session_state.get('_loaded_slot') == s:
+                        st.session_state.pop('_loaded_slot', None)
+                    st.session_state['_toast_msg'] = ('🗑', f'Deleted slot "{s}"')
+                    st.rerun()
         else:
-            current_slot = None
-
-        _cv             = st.session_state.get('_slot_input_v', 0)
-        create_expanded = st.session_state.get('_create_expanded', not bool(slots))
-        with st.expander('➕ New slot', expanded=create_expanded):
-            new_name = st.text_input('Slot name', key=f'new_slot_name_{_cv}',
-                                     placeholder='e.g. OnePlus13r')
-            if st.button('Create slot', key='btn_create_slot',
-                         use_container_width=True):
-                name = new_name.strip()
-                if not name:
-                    st.warning('Enter a slot name.')
-                elif name in slots:
-                    st.warning(f'"{name}" already exists.')
-                else:
-                    save_slot_config(name, {'playlists': [], 'movies': [], 'shows': {}})
-                    st.session_state['_slot_input_v']    = _cv + 1
-                    st.session_state['_create_expanded'] = False
-                    st.session_state['_toast_msg']       = ('✅', f'Created slot "{name}"')
-                    st.rerun()
-
-        if current_slot:
-            with st.expander('🗑 Delete slot'):
-                st.warning(f'Delete **{current_slot}**? Config only — no files deleted.')
-                if st.button('Confirm delete', key='btn_delete_slot',
-                             use_container_width=True, type='primary'):
-                    deleted = current_slot
-                    os.remove(os.path.join(CONFIGS_DIR, f'{current_slot}.json'))
-                    st.session_state.pop('_loaded_slot', None)
-                    st.session_state['_toast_msg'] = ('🗑', f'Deleted slot "{deleted}"')
-                    st.rerun()
+            st.info("No slots yet.")
 
         st.divider()
+        new_name = st.text_input("New slot name", placeholder="e.g. OnePlus13r",
+                                 key='sdlg_new_slot')
+        if st.button("Create slot", use_container_width=True, key='sdlg_create'):
+            name = new_name.strip()
+            if not name:
+                st.warning("Enter a name.")
+            elif name in slots:            # reuse list already fetched above
+                st.warning(f'"{name}" already exists.')
+            else:
+                save_slot_config(name, {'playlists': [], 'movies': [], 'shows': {}})
+                st.session_state['_toast_msg'] = ('✅', f'Created slot "{name}"')
+                st.rerun()
 
-        # ── 3. Global settings ────────────────────────────────────────────────
-        st.subheader('Global Settings')
-        sync_root = st.text_input(
-            'Sync root directory', value=plex_cfg['sync_root'],
-            key='cfg_sync_root', placeholder=DEFAULT_SYNC_ROOT)
-        st.caption('Subtitle languages (comma-separated codes, or "all")')
-        sub_lang_str = st.text_input(
-            'Subtitle languages', value=', '.join(plex_cfg['subtitle_languages']),
-            key='cfg_sub_langs', label_visibility='collapsed',
-            placeholder='en, es  or  all')
-        sub_forced = st.checkbox(
-            'Forced subtitles only', value=plex_cfg['subtitle_forced_only'],
-            key='cfg_sub_forced')
-        if st.button('Save global settings', use_container_width=True):
-            langs   = [l.strip() for l in sub_lang_str.split(',') if l.strip()] or ['all']
-            managed = st.session_state.get('cfg_managed_user', '(main account)')
-            save_plex_config({
-                'host':                 host.strip(),
-                'token':                token.strip(),
-                'managed_user':         '' if managed == '(main account)' else managed,
-                'sync_root':            sync_root.strip(),
-                'subtitle_languages':   langs,
-                'subtitle_forced_only': sub_forced,
-            })
-            _apply_managed_user()
-            _invalidate_library_cache()
-            st.toast('Global settings saved ✓', icon='✅')
+    # ── Save ──────────────────────────────────────────────────────────────────
+    st.divider()
+    if st.button("💾  Save Settings", type="primary", use_container_width=True):
+        new_token      = st.session_state.get('sdlg_token', '').strip()
+        new_host       = st.session_state.get('sdlg_host',  plex_cfg.get('host', ''))
+        new_sync_root  = st.session_state.get('sdlg_sync_root', '')
+        new_managed    = st.session_state.get('sdlg_managed', '(main account)')
+        new_sub_langs  = st.session_state.get('sdlg_sub_langs', 'en')
+        new_sub_forced = st.session_state.get('sdlg_sub_forced', False)
 
-    return current_slot
+        langs      = [l.strip() for l in new_sub_langs.split(',') if l.strip()] or ['en']
+        new_hidden = [
+            s['title'] for s in get_sections()
+            if not st.session_state.get(f'sdlg_libvis_{s["key"]}', True)
+        ]
+
+        save_plex_config({
+            'host':                 new_host.strip(),
+            'token':                new_token or plex_cfg.get('token', ''),
+            'managed_user':         '' if new_managed == '(main account)' else new_managed,
+            'sync_root':            new_sync_root.strip(),
+            'subtitle_languages':   langs,
+            'subtitle_forced_only': new_sub_forced,
+            'hidden_libraries':     new_hidden,
+        })
+        _invalidate_config_cache()
+        _apply_managed_user()
+        _invalidate_library_cache()
+        st.toast('Settings saved ✓', icon='💾')
+        st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SUMMARY PANEL
+# SYNC DIRECTORY SIZE
+# Walks the slot's sync directory on disk — fast, accurate, no Plex calls.
+# Result cached in session state; invalidated after sync or config change.
 # ══════════════════════════════════════════════════════════════════════════════
 
-def render_summary(slot: str) -> None:
-    """
-    Reads _saved_* directly — always current because on_change callbacks
-    update it on every interaction.
-    """
+def get_slot_dir_size(slot: str) -> Optional[float]:
+    """Returns current on-disk size of the slot directory in GB, or None."""
+    cache_key = f'_dir_size_{slot}'
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
+    sync_root = get_plex_config().get('sync_root', '').strip()
+    if not sync_root or not slot:
+        return None
+    slot_dir = os.path.join(sync_root, slot)
+    if not os.path.isdir(slot_dir):
+        return None
+    total = 0
+    for dirpath, _, filenames in os.walk(slot_dir):
+        for fname in filenames:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, fname))
+            except OSError:
+                pass
+    gb = total / (1024 ** 3)
+    st.session_state[cache_key] = gb
+    return gb
+
+
+def _clear_section(item_type: str, slot: str) -> None:
+    """Remove all items of a given type from the cart."""
+    if item_type == 'movie':
+        for section in get_sections():
+            if section['type'] != 'movie':
+                continue
+            for item in st.session_state.get(f'section_items_{section["key"]}', []):
+                st.session_state[f'chk_mov_{slot}_{item["ratingKey"]}'] = False
+        st.session_state['_saved_movies'] = set()
+    elif item_type == 'show':
+        for section in get_sections():
+            if section['type'] != 'show':
+                continue
+            for item in st.session_state.get(f'section_items_{section["key"]}', []):
+                st.session_state[f'chk_show_{slot}_{item["ratingKey"]}'] = False
+        st.session_state['_saved_shows'] = {}
+    elif item_type == 'playlist':
+        for pl in st.session_state.get('plex_playlists', []):
+            st.session_state[f'chk_pl_{slot}_{pl["ratingKey"]}'] = False
+        st.session_state['_saved_playlists'] = set()
+    st.session_state['_dirty'] = True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CART PANEL  —  left column
+# ══════════════════════════════════════════════════════════════════════════════
+
+def render_cart(slot: str) -> None:
     s_movies, s_shows, s_playlists = _get_saved()
     total = len(s_movies) + len(s_shows) + len(s_playlists)
 
-    with st.expander(f'📋 Current sync list  ({total} items)', expanded=True):
-        if total == 0:
-            st.caption('Nothing selected yet. Use the library tabs below.')
-            return
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.caption(f'**Movies** ({len(s_movies)})')
-            for t in sorted(s_movies):
-                st.caption(f'• {t}')
-        with col2:
-            st.caption(f'**TV Shows** ({len(s_shows)})')
-            for t, cfg in sorted(s_shows.items()):
-                st.caption(f'• {t}  _{mode_cfg_to_label(cfg)}_')
-        with col3:
-            st.caption(f'**Playlists** ({len(s_playlists)})')
-            for t in sorted(s_playlists):
-                st.caption(f'• {t}')
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# LIBRARY TABS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _pagination_controls(items: list, page_key: str) -> tuple:
-    """Render pagination controls. Returns (page_items, n_pages, page)."""
-    n_pages = max(1, (len(items) + PAGE_SIZE - 1) // PAGE_SIZE)
-    cur     = min(int(st.session_state.get(page_key, 1)), n_pages)
-    page    = st.number_input(
-        f'Page', min_value=1, max_value=n_pages, value=cur,
-        key=page_key, step=1, label_visibility='collapsed')
-    start = min((int(page) - 1) * PAGE_SIZE, max(0, len(items) - 1))
-    return items[start:start + PAGE_SIZE], n_pages, int(page)
-
-def _page_label(n_pages: int, page: int) -> str:
-    return f'Page {page} of {n_pages}  ·  {PAGE_SIZE} per page'
-
-def _sel_count_saved(saved_set_or_dict) -> int:
-    """Count selected items from _saved_* (works for off-screen paginated items)."""
-    return len(saved_set_or_dict)
-
-
-def render_movie_tab(section: dict, slot: str) -> None:
-    items = get_section_items(section['key'])
-    if not items:
-        st.info('No movies found.' if get_browse_plex() else 'Connect to Plex first.')
-        return
-
-    search   = st.text_input('🔍 Filter', key=f'search_mov_{section["key"]}',
-                              placeholder='Type to filter...')
-    filtered = [i for i in items if not search or search.lower() in i['title'].lower()]
-    s_movies, _, _ = _get_saved()
-    n_sel    = _sel_count_saved(s_movies)
-
-    c_actions, c_info = st.columns([1, 4])
-    with c_actions:
-        with st.popover("☑️ Bulk Actions", use_container_width=True):
-            if st.button('Select All', key=f'mov_all_{slot}_{section["key"]}', use_container_width=True):
-                for i in items:
-                    st.session_state[f'chk_mov_{slot}_{i["ratingKey"]}'] = True
-                st.session_state['_saved_movies'] = {i['title'] for i in items}
-                st.session_state['_dirty']        = True
-                st.rerun()
-            if st.button('Select None', key=f'mov_none_{slot}_{section["key"]}', use_container_width=True):
-                for i in items:
-                    st.session_state[f'chk_mov_{slot}_{i["ratingKey"]}'] = False
-                st.session_state['_saved_movies'] = set()
-                st.session_state['_dirty']        = True
-                st.rerun()
-            if st.button('Invert Selection', key=f'mov_inv_{slot}_{section["key"]}', use_container_width=True):
-                for i in items:
-                    k = f'chk_mov_{slot}_{i["ratingKey"]}'
-                    st.session_state[k] = not st.session_state.get(k, False)
-                st.session_state['_saved_movies'] = {
-                    i['title'] for i in items
-                    if st.session_state.get(f'chk_mov_{slot}_{i["ratingKey"]}', False)}
-                st.session_state['_dirty'] = True
-                st.rerun()
-                
-    c_info.caption(f'{n_sel} selected · {len(filtered)} shown · {len(items)} total')
-
-    page_items, n_pages, page = _pagination_controls(filtered, f'page_mov_{section["key"]}')
-    if n_pages > 1:
-        st.caption(_page_label(n_pages, page))
-
-    s_movies_cur, _, _ = _get_saved()
-    cols = st.columns(3)
-    for idx, item in enumerate(page_items):
-        rk, title = item['ratingKey'], item['title']
-        label = f"{title} ({item['year']})" if item['year'] else title
-        # value= initialises the key when absent (navigation, tab switch, etc.)
-        # When key exists (user on same page), Streamlit ignores value= and uses ss[key]
-        cols[idx % 3].checkbox(label, key=f'chk_mov_{slot}_{rk}',
-                               value=title in s_movies_cur,
-                               on_change=_on_movie_change, args=(rk, title, slot))
-
-    if n_pages > 1:
-        st.caption(_page_label(n_pages, page))
-
-
-def render_show_tab(section: dict, slot: str) -> None:
-    items = get_section_items(section['key'])
-    if not items:
-        st.info('No shows found.' if get_browse_plex() else 'Connect to Plex first.')
-        return
-
-    search   = st.text_input('🔍 Filter', key=f'search_show_{section["key"]}',
-                              placeholder='Type to filter...')
-    filtered = [i for i in items if not search or search.lower() in i['title'].lower()]
-    _, s_shows_all, _ = _get_saved()
-    n_sel    = _sel_count_saved(s_shows_all)
-
-    c_actions, c_info = st.columns([1, 4])
-    with c_actions:
-        with st.popover("☑️ Bulk Actions", use_container_width=True):
-            if st.button('Select All', key=f'show_all_{slot}_{section["key"]}', use_container_width=True):
-                for i in items:
-                    st.session_state[f'chk_show_{slot}_{i["ratingKey"]}'] = True
-                st.session_state['_saved_shows'] = {
-                    i['title']: label_to_mode_cfg(
-                        st.session_state.get(f'mode_show_{slot}_{i["ratingKey"]}', 'Next unwatched'))
-                    for i in items}
-                st.session_state['_dirty'] = True
-                st.rerun()
-            if st.button('Select None', key=f'show_none_{slot}_{section["key"]}', use_container_width=True):
-                for i in items:
-                    st.session_state[f'chk_show_{slot}_{i["ratingKey"]}'] = False
-                st.session_state['_saved_shows'] = {}
-                st.session_state['_dirty']       = True
-                st.rerun()
-            if st.button('Invert Selection', key=f'show_inv_{slot}_{section["key"]}', use_container_width=True):
-                for i in items:
-                    k = f'chk_show_{slot}_{i["ratingKey"]}'
-                    st.session_state[k] = not st.session_state.get(k, False)
-                st.session_state['_saved_shows'] = {
-                    i['title']: label_to_mode_cfg(
-                        st.session_state.get(f'mode_show_{slot}_{i["ratingKey"]}', 'Next unwatched'))
-                    for i in items
-                    if st.session_state.get(f'chk_show_{slot}_{i["ratingKey"]}', False)}
-                st.session_state['_dirty'] = True
-                st.rerun()
-
-    c_info.caption(f'{n_sel} selected · {len(filtered)} shown · {len(items)} total')
-
-    page_items, n_pages, page = _pagination_controls(filtered, f'page_show_{section["key"]}')
-    if n_pages > 1:
-        st.caption(_page_label(n_pages, page))
-
+    # ── Header row: title + total count ───────────────────────────────────────
     h1, h2 = st.columns([3, 2])
-    h1.caption('**Show**')
-    h2.caption('**Sync mode**')
+    h1.markdown("##### Sync Queue")
+    if total:
+        h2.caption(f"{total} item{'s' if total != 1 else ''} selected")
 
-    for item in page_items:
-        rk, title = item['ratingKey'], item['title']
-        _, saved_shows, _ = _get_saved()
-
-        # Build label with unwatched badge
-        unwatched = item.get('unwatchedCount')
-        base_label = f"{title} ({item['year']})" if item['year'] else title
-        if unwatched is not None and unwatched > 0:
-            badge_label = f"{base_label}  ·  {unwatched} unwatched"
-        else:
-            badge_label = base_label
-
-        c1, c2  = st.columns([3, 2])
-        # value= initialises the key when absent; ignored when key exists
-        new_chk = c1.checkbox(badge_label, key=f'chk_show_{slot}_{rk}',
-                              value=title in saved_shows,
-                              on_change=_on_show_change, args=(rk, title, slot))
-        if new_chk:
-            c2.selectbox('##', SYNC_MODE_LABELS,
-                         key=f'mode_show_{slot}_{rk}',
-                         index=SYNC_MODE_LABELS.index(
-                             mode_cfg_to_label(saved_shows.get(title, {}))
-                         ),
-                         label_visibility='collapsed',
-                         on_change=_on_mode_change, args=(rk, title, slot))
-        else:
-            c2.caption('—')
-
-    if n_pages > 1:
-        st.caption(_page_label(n_pages, page))
-
-
-def render_playlist_tab(slot: str) -> None:
-    playlists = get_playlists()
-    if not playlists:
-        st.info('No video playlists found.' if get_browse_plex() else 'Connect to Plex first.')
+    if total == 0:
+        st.caption("Nothing selected. Browse and check items on the right →")
         return
 
-    search   = st.text_input('🔍 Filter', key='search_pl',
-                              placeholder='Type to filter...')
+    # ── Disk size + clear all ─────────────────────────────────────────────────
+    gb = get_slot_dir_size(slot)
+    sz1, sz2 = st.columns([3, 2])
+    if gb is not None:
+        sz1.caption(f"📁 {gb:.1f} GB on disk")
+    elif get_plex_config().get('sync_root'):
+        sz1.caption("📁 Sync directory not found yet")
+    if sz2.button("✕ Clear All", key=f'clr_all_{slot}', help="Remove everything from queue"):
+        _clear_section('movie',    slot)
+        _clear_section('show',     slot)
+        _clear_section('playlist', slot)
+        st.rerun()
+
+    st.divider()
+
+    # ── Movies ────────────────────────────────────────────────────────────────
+    if s_movies:
+        st.caption(f"**Movies** — {len(s_movies)}")
+        for title in sorted(s_movies):
+            c1, c2 = st.columns([10, 1])
+            c1.caption(title)
+            if c2.button("✕", key=f'rm_mov_{slot}_{title}', help="Remove"):
+                remove_from_cart(title, 'movie', slot)
+                st.rerun()
+
+    # ── Shows ─────────────────────────────────────────────────────────────────
+    if s_shows:
+        st.caption(f"**Shows** — {len(s_shows)}")
+        for title, mode_cfg in sorted(s_shows.items()):
+            c1, c2, c3 = st.columns([5, 4, 1])
+            c1.caption(title)
+            c2.caption(f"_{mode_cfg_to_label(mode_cfg)}_")
+            if c3.button("✕", key=f'rm_show_{slot}_{title}', help="Remove"):
+                remove_from_cart(title, 'show', slot)
+                st.rerun()
+
+    # ── Playlists ─────────────────────────────────────────────────────────────
+    if s_playlists:
+        st.caption(f"**Playlists** — {len(s_playlists)}")
+        for title in sorted(s_playlists):
+            c1, c2 = st.columns([10, 1])
+            c1.caption(title)
+            if c2.button("✕", key=f'rm_pl_{slot}_{title}', help="Remove"):
+                remove_from_cart(title, 'playlist', slot)
+                st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BROWSER PANEL  —  right column
+# One tab per visible Plex library + one Playlists tab.
+# All items rendered at once — page scrolls naturally, no height constraint.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def render_browser(slot: str) -> None:
+    plex     = get_browse_plex()
+    sections = get_visible_sections()
+    pls      = get_playlists()
+
+    if not plex:
+        st.info("⚙ Open Settings to configure your Plex connection.")
+        return
+
+    if not sections and not pls:
+        st.info("No visible libraries. Check Settings → Libraries.")
+        return
+
+    tab_labels = [s['title'] for s in sections]
+    if pls:
+        tab_labels.append("Playlists")
+
+    tabs = st.tabs(tab_labels)
+
+    for i, section in enumerate(sections):
+        with tabs[i]:
+            _render_section(section, slot)
+
+    if pls:
+        with tabs[-1]:
+            _render_playlists(slot)
+
+
+def _render_section(section: dict, slot: str) -> None:
+    with st.spinner(f"Loading {section['title']}…"):
+        items = get_section_items(section['key'])
+
+    if not items:
+        st.info(f"No items found in {section['title']}.")
+        return
+
+    s_movies, s_shows, _ = _get_saved()
+
+    search   = st.text_input(
+        "Filter", placeholder=f"Filter {section['title']}…",
+        key=f'search_{section["key"]}', label_visibility='collapsed'
+    )
+    filtered = [i for i in items if not search or search.lower() in i['title'].lower()]
+    st.caption(f"{len(filtered)} of {len(items)}")
+
+    if section['type'] == 'movie':
+        cols = st.columns(3)
+        for idx, item in enumerate(filtered):
+            rk, title = item['ratingKey'], item['title']
+            label     = f"{title} ({item['year']})" if item['year'] else title
+            cols[idx % 3].checkbox(
+                label,
+                key=f'chk_mov_{slot}_{rk}',
+                value=title in s_movies,
+                on_change=_on_movie_change, args=(rk, title, slot)
+            )
+
+    elif section['type'] == 'show':
+        h1, h2 = st.columns([3, 2])
+        h1.caption("**Show**")
+        h2.caption("**Sync mode**")
+        for item in filtered:
+            rk, title    = item['ratingKey'], item['title']
+            unwatched    = item.get('unwatchedCount')
+            base_label   = f"{title} ({item['year']})" if item['year'] else title
+            badge_label  = f"{base_label}  ·  {unwatched} unwatched" \
+                           if unwatched else base_label
+
+            c1, c2 = st.columns([3, 2])
+            checked = c1.checkbox(
+                badge_label,
+                key=f'chk_show_{slot}_{rk}',
+                value=title in s_shows,
+                on_change=_on_show_change, args=(rk, title, slot)
+            )
+            if checked:
+                c2.selectbox(
+                    "##", SYNC_MODE_LABELS,
+                    key=f'mode_show_{slot}_{rk}',
+                    index=SYNC_MODE_LABELS.index(
+                        mode_cfg_to_label(s_shows.get(title, {}))
+                    ),
+                    label_visibility='collapsed',
+                    on_change=_on_mode_change, args=(rk, title, slot)
+                )
+            else:
+                c2.caption("—")
+
+
+def _render_playlists(slot: str) -> None:
+    playlists    = get_playlists()
+    _, _, s_pls  = _get_saved()
+
+    search   = st.text_input(
+        "Filter", placeholder="Filter playlists…",
+        key='search_pl', label_visibility='collapsed'
+    )
     filtered = [p for p in playlists
                 if not search or search.lower() in p['title'].lower()]
-    _, _, s_playlists_all = _get_saved()
-    n_sel    = _sel_count_saved(s_playlists_all)
+    st.caption(f"{len(filtered)} of {len(playlists)}")
 
-    c_actions, c_info = st.columns([1, 4])
-    with c_actions:
-        with st.popover("☑️ Bulk Actions", use_container_width=True):
-            if st.button('Select All', key=f'pl_all_{slot}', use_container_width=True):
-                for p in playlists:
-                    st.session_state[f'chk_pl_{slot}_{p["ratingKey"]}'] = True
-                st.session_state['_saved_playlists'] = {p['title'] for p in playlists}
-                st.session_state['_dirty']           = True
-                st.rerun()
-            if st.button('Select None', key=f'pl_none_{slot}', use_container_width=True):
-                for p in playlists:
-                    st.session_state[f'chk_pl_{slot}_{p["ratingKey"]}'] = False
-                st.session_state['_saved_playlists'] = set()
-                st.session_state['_dirty']           = True
-                st.rerun()
-            if st.button('Invert Selection', key=f'pl_inv_{slot}', use_container_width=True):
-                for p in playlists:
-                    k = f'chk_pl_{slot}_{p["ratingKey"]}'
-                    st.session_state[k] = not st.session_state.get(k, False)
-                st.session_state['_saved_playlists'] = {
-                    p['title'] for p in playlists
-                    if st.session_state.get(f'chk_pl_{slot}_{p["ratingKey"]}', False)}
-                st.session_state['_dirty'] = True
-                st.rerun()
-
-    c_info.caption(f'{n_sel} selected · {len(playlists)} total')
-
-    _, _, s_playlists_cur = _get_saved()
     for pl in filtered:
         rk, title = pl['ratingKey'], pl['title']
-        # value= initialises the key when absent; ignored when key exists
-        st.checkbox(f"{title}  ({pl['leafCount']} items)",
-                    key=f'chk_pl_{slot}_{rk}',
-                    value=title in s_playlists_cur,
-                    on_change=_on_playlist_change, args=(rk, title, slot))
+        st.checkbox(
+            f"{title}  ({pl['leafCount']} items)",
+            key=f'chk_pl_{slot}_{rk}',
+            value=title in s_pls,
+            on_change=_on_playlist_change, args=(rk, title, slot)
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SYNC OUTPUT  (two-phase: phase 1 streams + stores; phase 2 displays)
-# Uses st.status for a cleaner collapsible output container.
+# SYNC OUTPUT
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_sync_live(slot_name: str) -> None:
-    # Phase 2: output stored — display with st.status
+    # Phase 2: stored output — display with st.status
     if '_sync_output' in st.session_state:
         rc    = st.session_state.get('_sync_rc', 0)
         lines = st.session_state['_sync_output']
@@ -724,11 +822,11 @@ def run_sync_live(slot_name: str) -> None:
             st.rerun()
         return
 
-    # Phase 1: run subprocess, stream into st.status
-    with st.status(f'⏳ Syncing {slot_name}...', expanded=True) as status:
-        lines: list = []
+    # Phase 1: stream output
+    with st.status(f'⏳ Syncing {slot_name}…', expanded=True) as status:
+        lines:  list = []
         output = st.empty()
-        proc = subprocess.Popen(
+        proc   = subprocess.Popen(
             [sys.executable, WORKER, '--slot', slot_name],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, cwd=SCRIPT_DIR,
@@ -738,48 +836,119 @@ def run_sync_live(slot_name: str) -> None:
             output.code('\n'.join(lines), language=None)
         proc.wait()
         if proc.returncode == 0:
-            status.update(label='✅ Sync complete', state='complete', expanded=True)
+            status.update(label='✅ Sync complete',
+                          state='complete', expanded=True)
         else:
             status.update(label=f'❌ Sync failed (exit {proc.returncode})',
                           state='error', expanded=True)
 
+    # Invalidate dir-size cache so the cart shows updated size after next sync
+    st.session_state.pop(f'_dir_size_{slot_name}', None)
     st.session_state['_sync_output'] = lines
     st.session_state['_sync_rc']     = proc.returncode
     st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FOOTER
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _footer() -> None:
-    st.divider()
-    st.caption(f'PlexSyncer {VERSION}')
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _do_save(slot: str) -> int:
+    """Save current widget state to disk. Returns item count."""
+    plex_cfg = get_plex_config()
+    if not plex_cfg.get('sync_root', '').strip():
+        st.error('Set the sync root directory in Settings before saving.')
+        st.stop()
+    selections = build_selections_from_widgets(slot)
+    save_slot_config(slot, selections)
+    st.session_state['_saved_movies']    = set(selections['movies'])
+    st.session_state['_saved_playlists'] = set(selections['playlists'])
+    st.session_state['_saved_shows']     = selections['shows']
+    st.session_state['_dirty']           = False
+    return len(selections['movies']) + len(selections['shows']) + len(selections['playlists'])
+
+
 def main():
     st.set_page_config(
-        page_title=f'PlexSyncer {VERSION}', page_icon=APP_ICON,
-        layout='wide', initial_sidebar_state='expanded',
+        page_title=f'PlexSyncer {VERSION}',
+        page_icon=APP_ICON,
+        layout='wide',
+        initial_sidebar_state='collapsed',
     )
 
-    if '_toast_msg' in st.session_state:
-        icon, msg = st.session_state.pop('_toast_msg')
-        st.toast(msg, icon=icon)
+    # Auto-connect once per session
+    auto_connect()
 
-    current_slot = render_sidebar()
+    # Pending toasts
+    for key in ('_toast_msg', '_startup_toast'):
+        if key in st.session_state:
+            icon, msg = st.session_state.pop(key)
+            st.toast(msg, icon=icon)
+
+    slots = list_slots()
+
+    # ── Header ─────────────────────────────────────────────────────────────────
+    c_logo, c_slots, c_actions = st.columns([2, 7, 2])
+
+    with c_logo:
+        plex  = get_browse_plex()
+        admin = st.session_state.get('plex_admin')
+        st.markdown(f"#### {APP_ICON} PlexSyncer")
+        if plex:
+            st.caption(f"🟢 {admin.friendlyName}")
+        else:
+            st.caption("🔴 Not connected")
+
+    with c_slots:
+        if not slots:
+            st.caption("No slots yet — open ⚙ Settings to create one.")
+            current_slot = None
+        else:
+            # Use segmented_control (1.40+) for the cleanest tab look,
+            # fall back to horizontal radio on older versions.
+            if hasattr(st, 'segmented_control'):
+                current_slot = st.segmented_control(
+                    "Active slot", slots,
+                    default=slots[0],
+                    key='slot_ctrl',
+                    label_visibility='collapsed',
+                )
+                if current_slot is None:
+                    current_slot = slots[0]
+            else:
+                current_slot = st.radio(
+                    "Active slot", slots,
+                    horizontal=True,
+                    key='slot_radio',
+                    label_visibility='collapsed',
+                )
+
+    with c_actions:
+        dirty = st.session_state.get('_dirty', False)
+        b1, b2, b3 = st.columns(3)
+
+        if b1.button("⚙", help="Settings", use_container_width=True):
+            show_settings()
+
+        if current_slot:
+            save_icon = "💾●" if dirty else "💾"
+            if b2.button(save_icon, help="Save", use_container_width=True):
+                n = _do_save(current_slot)
+                st.toast(f'Saved — {n} items', icon='💾')
+                st.rerun()
+
+            if b3.button("▶", help="Save & Sync", type="primary",
+                         use_container_width=True):
+                _do_save(current_slot)
+                st.session_state['_pending_sync'] = current_slot
+                st.rerun()
+
+    st.divider()
 
     if not current_slot:
-        st.title(f'{APP_ICON} PlexSyncer')
-        st.info('👈 Create a slot in the sidebar to get started.')
-        _footer()
         return
 
-    # Switch slot on first load, genuine slot change, or return from sync
+    # Slot switch
     if st.session_state.get('_loaded_slot') != current_slot:
         switch_slot(current_slot)
 
@@ -789,83 +958,21 @@ def main():
         st.session_state['_show_sync'] = True
 
     if st.session_state.get('_show_sync') or '_sync_output' in st.session_state:
-        st.title(f'{APP_ICON} PlexSyncer  —  {current_slot}')
         run_sync_live(current_slot)
-        _footer()
+        st.caption(f'PlexSyncer {VERSION}')
         return
 
-    # Config view
-    plex_cfg  = load_plex_config()
-    sync_root = plex_cfg.get('sync_root', DEFAULT_SYNC_ROOT)
-    slot_dir  = os.path.join(sync_root, current_slot)
+    # ── Main two-column layout ─────────────────────────────────────────────────
+    col_cart, col_browser = st.columns([1, 2.5])
 
-    st.title(f'{APP_ICON} PlexSyncer  —  {current_slot}')
-    st.caption(f'Sync directory: `{slot_dir}`')
+    with col_cart:
+        render_cart(current_slot)
 
-    managed = plex_cfg.get('managed_user', '')
-    if managed:
-        st.caption(f'Browsing as managed user: **{managed}**')
-
-    # Unsaved changes indicator + action buttons
-    dirty = st.session_state.get('_dirty', False)
-    c_save, c_sync, c_warn = st.columns([1, 1, 5])
-    save_clicked = c_save.button('💾 Save',       use_container_width=True)
-    sync_clicked = c_sync.button('▶ Save & Sync', use_container_width=True,
-                                 type='primary')
-                                 
-    # Fix: Use an empty container so we can clear the warning after saving in the same run
-    warn_placeholder = c_warn.empty()
-    if dirty:
-        warn_placeholder.warning('⚠ Unsaved changes', icon=None)
-
-    if save_clicked or sync_clicked:
-        if not sync_root.strip():
-            st.error('Set the sync root directory in Global Settings first.')
-            st.stop()
-        selections = build_selections_from_widgets(current_slot)
-        save_slot_config(current_slot, selections)
-        st.session_state['_saved_movies']    = set(selections['movies'])
-        st.session_state['_saved_playlists'] = set(selections['playlists'])
-        st.session_state['_saved_shows']     = selections['shows']
-        st.session_state['_dirty']           = False
-        
-        warn_placeholder.empty()  # Instantly clear the warning message
-        
-        if save_clicked:
-            n = len(selections['movies']) + len(selections['shows']) + len(selections['playlists'])
-            st.toast(f'Config saved — {n} items', icon='💾')
-        if sync_clicked:
-            st.session_state['_pending_sync'] = current_slot
-            st.rerun()
+    with col_browser:
+        render_browser(current_slot)
 
     st.divider()
-    render_summary(current_slot)
-    st.divider()
-
-    plex = get_browse_plex()
-    if not plex:
-        st.info('👈 Connect to Plex in the sidebar to browse your libraries.')
-        _footer()
-        return
-
-    sections   = get_sections()
-    tab_labels = [s['title'] for s in sections] + ['Playlists']
-    if not sections:
-        st.warning('No movie or TV show libraries found on this server.')
-        _footer()
-        return
-
-    tabs = st.tabs(tab_labels)
-    for i, section in enumerate(sections):
-        with tabs[i]:
-            if section['type'] == 'movie':
-                render_movie_tab(section, current_slot)
-            elif section['type'] == 'show':
-                render_show_tab(section, current_slot)
-    with tabs[-1]:
-        render_playlist_tab(current_slot)
-
-    _footer()
+    st.caption(f'PlexSyncer {VERSION}')
 
 
 if __name__ == '__main__':

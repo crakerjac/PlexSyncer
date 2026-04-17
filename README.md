@@ -262,12 +262,13 @@ The Plex connection and sync root live in `configs/plex.json`:
 
 ```json
 {
-  "host": "http://YOUR_SERVER:32400",
+  "host": "http://localhost:32400",
   "token": "YOUR_PLEX_TOKEN",
   "managed_user": "",
   "sync_root": "/media/drive/PlexSyncer",
   "subtitle_languages": ["en"],
-  "subtitle_forced_only": false
+  "subtitle_forced_only": false,
+  "hidden_libraries": []
 }
 ```
 
@@ -359,7 +360,7 @@ Bitrate is the primary sort key; file size is the tiebreaker.
 ## 8. Management UI
 
 **File:** `sync_ui.py`
-**Framework:** Streamlit ≥ 1.31.0
+**Framework:** Streamlit ≥ 1.34.0
 **Access:** `http://{server-ip}:8501`
 
 ### Quick Start (manual)
@@ -392,26 +393,43 @@ sudo systemctl restart plexsyncer
 sudo journalctl -u plexsyncer -f
 ```
 
+### Layout
+
+The UI uses a two-column cart + search layout:
+
+- **Left — Sync Queue:** Everything queued for the active slot. Shows item count, current
+  on-disk size of the slot directory, inline sync mode for each show, per-item ✕ remove
+  buttons, and a Clear All button.
+- **Right — Browser:** One tab per Plex library plus a Playlists tab. All items load at
+  once with a live filter box — no pagination. Check/uncheck items to add or remove them
+  from the queue.
+
+Slot tabs run across the top of the page. The UI connects to Plex automatically on load
+using the stored token — no manual Connect step required.
+
 ### Features
 
 | Feature | Status |
 |---|---|
-| Slot selector / creator / delete | ✅ Done |
+| Slot tabs across top (segmented control) | ✅ Done |
+| Auto-connect to Plex on page load | ✅ Done |
 | Plex connection + managed user | ✅ Done |
-| Library browser (movies, shows, playlists) | ✅ Done |
-| TV show "Next X" sync mode selector | ✅ Done |
+| Library browser — one tab per library | ✅ Done |
+| Hide libraries from browser (UI-only, worker unaffected) | ✅ Done |
+| TV show sync mode selector (next N, latest N, all) | ✅ Done |
 | Unwatched episode count badge | ✅ Done |
-| Bulk select / invert per tab | ✅ Done |
-| Paginated library lists (50/page) | ✅ Done |
-| Live sync list (current selections) | ✅ Done |
+| All items loaded at once — no pagination | ✅ Done |
+| Cart panel (left column) with live queue | ✅ Done |
+| Per-item ✕ remove + Clear All | ✅ Done |
+| Item count + on-disk size display | ✅ Done |
 | Unsaved changes indicator | ✅ Done |
 | Save config + Save & Sync | ✅ Done |
 | Live sync output log | ✅ Done |
-| Global settings (sync root, subtitles) | ✅ Done |
+| Settings dialog (connection, sync, libraries, slots) | ✅ Done |
 
 ### Requirements
 
-Streamlit ≥ 1.31.0 is required for `st.popover` and `st.status`.
+Streamlit ≥ 1.34.0 is required for `@st.dialog`.
 See `requirements.txt`.
 
 ---
@@ -419,8 +437,9 @@ See `requirements.txt`.
 ## 9. Plezy Fork
 
 **Repository:** [`crakerjac/plezy`](https://github.com/crakerjac/plezy) — fork of [`edde746/plezy`](https://github.com/edde746/plezy)
-**Version tag:** `+PlexSyncer` build suffix in `pubspec.yaml`
+**Current release:** `1.33.1+PlexSyncer`
 **Target platform:** Android
+**Status:** Complete. Build from source or download the latest release from the fork repository.
 
 All PlexSyncer-specific changes are marked with `// PlexSyncer` comments for easy
 identification during upstream rebases.
@@ -538,7 +557,7 @@ locations) are never touched, regardless of what's in the manifest.
 
 - Python 3.10+
 - `pip install -r requirements.txt` (or run `bash install_service.sh`)
-- Streamlit ≥ 1.31.0
+- Streamlit ≥ 1.34.0
 - `sync_root` must be on the **same filesystem partition** as the Plex media library
   (required for hard links — cross-device links fail with `errno 18`)
 
@@ -607,4 +626,4 @@ partition on all platforms.
 | 2 | Automatic Scan after Round Sync completes (broadcast intent?) | Low — manual is safe for now |
 | 3 | macOS testing | Low |
 | 4 | Windows hard link support (privilege check + fallback) | Low |
-| 5 | Upstream PR to Plezy for the scan / manifest import feature | Deferred |
+| 5 | Upstream PR to Plezy for scan / manifest import | Not planned — upstream has shipped its own sync rules feature (`edde746/plezy` commit 3607416), which takes a different device-pull approach. The PlexSyncer fork remains a separate, maintained build. |
