@@ -18,12 +18,14 @@ Setup:
        http://localhost:5001/plexhook
 
 Runs on port 5001 by default (Streamlit UI is on 8501).
+Includes a 5-minute rate limit.
 """
 
 import json
 import logging
 import os
 import subprocess
+import time
 from flask import Flask, request
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -41,12 +43,15 @@ SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 VENV_PYTHON = os.path.join(SCRIPT_DIR, 'venv', 'bin', 'python')
 WORKER      = os.path.join(SCRIPT_DIR, 'plex_hardlink_sync.py')
 LOCK_FILE   = '/tmp/plexsyncer.lock'
+TIME_FILE   = '/tmp/plexsyncer_last_run.txt'
 PORT        = 5001
+
+# Cooldown in seconds (5 minutes)
+COOLDOWN_SECONDS = 300 
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
-
 
 @app.route('/plexhook', methods=['POST'])
 def plexhook():
@@ -65,11 +70,35 @@ def plexhook():
     event = data.get('event', '')
     title = data.get('Metadata', {}).get('title', 'unknown')
 
-    if event != 'media.scrobble':
-        # Ignore all other events (play, pause, rate, etc.)
+    log.info(f'Received webhook event: {event}')
+
+    # 1. Filter for media.stop
+    if event != 'media.stop':
         return 'OK', 200
 
-    log.info(f'media.scrobble received for "{title}" — triggering sync')
+    # 2. Check the rate limit
+    current_time = time.time()
+    last_run = 0.0
+
+    if os.path.exists(TIME_FILE):
+        try:
+            with open(TIME_FILE, 'r') as f:
+                last_run = float(f.read().strip())
+        except ValueError:
+            pass # If the file is corrupted, default to 0.0 and allow the run
+
+    time_since_last_run = current_time - last_run
+
+    if time_since_last_run < COOLDOWN_SECONDS:
+        time_left = int(COOLDOWN_SECONDS - time_since_last_run)
+        log.info(f'Rate limit active. Skipping sync for "{title}". Cooldown ends in {time_left}s.')
+        return 'OK', 200 # Return 200 so Plex doesn't think the webhook failed
+
+    # 3. Update the timestamp for the next run
+    with open(TIME_FILE, 'w') as f:
+        f.write(str(current_time))
+
+    log.info(f'Received event [{event}] for "{title}" — triggering sync')
 
     # Fire-and-forget: return 200 immediately, sync runs in background.
     # flock -n acquires a non-blocking lock; if a sync is already running
@@ -84,7 +113,6 @@ def plexhook():
     )
 
     return 'OK', 200
-
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
