@@ -20,7 +20,8 @@
 12. [Deployment](#12-deployment)
 13. [Mobile Sync Options](#13-mobile-sync-options)
 14. [Platform Support](#14-platform-support)
-15. [Open Questions / Future Work](#15-open-questions--future-work)
+15. [Plex Webhook](#15-plex-webhook--optional)
+16. [Open Questions / Future Work](#16-open-questions--future-work)
 
 ---
 
@@ -103,6 +104,7 @@ only operates on the `PlexSyncer` folder — it never affects native downloads.
 |---|---|---|
 | `plex_hardlink_sync.py` | Python | Core sync worker: hard links, manifest, pruning |
 | `sync_ui.py` | Python / Streamlit | Web UI for slot configuration and sync triggering |
+| `plex_webhook.py` | Python / Flask | Optional webhook receiver: triggers sync on Plex events |
 | Plezy fork | Dart / Flutter | Android app: manifest import, scan button, artwork fetch |
 | rclone / Round Sync | — | File transport to phone (one-way, user-configured) |
 
@@ -618,7 +620,96 @@ partition on all platforms.
 
 ---
 
-## 15. Open Questions / Future Work
+## 15. Plex Webhook  *(optional)*
+
+The webhook receiver triggers `--all-slots` when Plex fires a `media.stop` event,
+keeping slot manifests current without waiting for the next cron run. A 5-minute
+cooldown prevents rapid repeated triggers from stacking syncs.
+
+**File:** `plex_webhook.py`
+**Port:** `5001`
+**Event handled:** `media.stop`
+
+### How It Works
+
+1. Plex fires a `media.stop` webhook when playback stops on any client
+2. The receiver checks a 5-minute cooldown — if a sync ran recently, the event
+   is acknowledged but the sync is skipped
+3. If the cooldown has elapsed, `plex_hardlink_sync.py --all-slots` is called
+   in the background
+4. `flock -n` ensures that if a sync is already running (via cron or a previous
+   webhook), the new invocation exits silently rather than stacking
+5. Returns `200 OK` immediately — Plex does not wait for the sync to finish
+
+> **Note on `media.scrobble`:** Plex's `media.scrobble` event (fired when an item
+> is marked as fully watched) is unreliable — it fires internally but webhook
+> delivery is frequently skipped. `media.stop` fires consistently on every
+> playback session end and is used instead.
+
+### Installation
+
+The webhook service is opt-in during `install_service.sh`:
+
+```
+ Install the webhook service? [y/N]
+```
+
+To install it after the fact, re-run `install_service.sh` and answer `y` when prompted.
+
+Or install manually:
+
+```bash
+source venv/bin/activate
+pip install flask waitress
+```
+
+Then create `/etc/systemd/system/plexsyncer-webhook.service`:
+
+```ini
+[Unit]
+Description=PlexSyncer Webhook Receiver
+After=network.target
+
+[Service]
+User=YOUR_USER
+WorkingDirectory=/path/to/PlexSyncer
+ExecStart=/path/to/PlexSyncer/venv/bin/python /path/to/PlexSyncer/plex_webhook.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable plexsyncer-webhook.service
+sudo systemctl start  plexsyncer-webhook.service
+```
+
+### Plex Configuration
+
+In Plex Web: **Settings → Webhooks → Add Webhook**
+
+```
+http://localhost:5001/plexhook
+```
+
+`localhost` works because PlexSyncer must run on the same machine as Plex.
+
+Plex requires a Plex Pass subscription to send webhooks.
+
+### Managing the Service
+
+```bash
+sudo systemctl status  plexsyncer-webhook.service
+sudo systemctl restart plexsyncer-webhook.service
+sudo journalctl -u     plexsyncer-webhook.service -f
+```
+
+---
+
+## 16. Open Questions / Future Work
 
 | # | Item | Priority |
 |---|---|---|
