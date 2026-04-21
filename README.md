@@ -618,7 +618,91 @@ partition on all platforms.
 
 ---
 
-## 15. Open Questions / Future Work
+## 15. Plex Webhook  *(optional)*
+
+The webhook receiver triggers `--all-slots` immediately when Plex marks an item as
+watched (`media.scrobble`), keeping slot manifests current without waiting for the
+next cron run. This is useful when a device syncs via rclone shortly after the user
+finishes watching something — the next sync will already have the right content.
+
+**File:** `plex_webhook.py`
+**Port:** `5001`
+**Event handled:** `media.scrobble` only
+
+### How It Works
+
+1. Plex fires a `media.scrobble` webhook when an item is marked as watched
+2. The receiver calls `plex_hardlink_sync.py --all-slots` in the background
+3. `flock -n` ensures that if a sync is already in progress (via cron or a
+   previous webhook), the new invocation exits silently rather than stacking
+4. Returns `200 OK` immediately — Plex does not wait for the sync to finish
+
+### Installation
+
+The webhook service is opt-in during `install_service.sh`:
+
+```
+ Install the webhook service? [y/N]
+```
+
+To install it after the fact, re-run `install_service.sh` and answer `y` when prompted.
+
+Or install manually:
+
+```bash
+source venv/bin/activate
+pip install flask waitress
+```
+
+Then create `/etc/systemd/system/plexsyncer-webhook.service`:
+
+```ini
+[Unit]
+Description=PlexSyncer Webhook Receiver
+After=network.target
+
+[Service]
+User=YOUR_USER
+WorkingDirectory=/path/to/PlexSyncer
+ExecStart=/path/to/PlexSyncer/venv/bin/python /path/to/PlexSyncer/plex_webhook.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable plexsyncer-webhook.service
+sudo systemctl start  plexsyncer-webhook.service
+```
+
+### Plex Configuration
+
+In Plex Web: **Settings → Webhooks → Add Webhook**
+
+```
+http://localhost:5001/plexhook
+```
+
+`localhost` works because PlexSyncer must run on the same machine as Plex. The webhook
+request never leaves the machine, so **no firewall changes are needed** — UFW does not
+filter loopback traffic.
+
+Plex requires a Plex Pass subscription to send webhooks.
+
+### Managing the Service
+
+```bash
+sudo systemctl status  plexsyncer-webhook.service
+sudo systemctl restart plexsyncer-webhook.service
+sudo journalctl -u     plexsyncer-webhook.service -f
+```
+
+---
+
+## 16. Open Questions / Future Work
 
 | # | Item | Priority |
 |---|---|---|
