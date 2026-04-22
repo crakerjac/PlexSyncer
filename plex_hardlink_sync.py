@@ -323,14 +323,32 @@ def collect_show_episodes(plex: PlexServer, show_title: str,
 # MANIFEST
 # ══════════════════════════════════════════════════════════════════════════════
 
+
+def strip_artwork_timestamp(path: Optional[str]) -> Optional[str]:
+    """Strip Plex's cache-busting timestamp suffix from artwork paths.
+
+    Plex appends a version integer to artwork URLs to bust caches, e.g.:
+        /library/metadata/193445/thumb/1776207042
+    The integer changes whenever the artwork is updated on the server, which
+    causes the MD5-based local filename to change between syncs even though
+    the actual image hasn't changed.  Normalising to the canonical path:
+        /library/metadata/193445/thumb
+    ensures the local artwork file is always found regardless of which
+    manifest version registered the item.
+    """
+    if not path:
+        return path
+    return re.sub(r'/(thumb|art|banner|composite|background)/\d+$', r'/\1', path)
+
+
 def build_manifest_entry(item, rel: str,
                          show_year: Optional[int] = None) -> dict:
     e = {
         'ratingKey':    str(item.ratingKey),
         'type':         item.TYPE,
         'title':        item.title,
-        'thumb':        getattr(item, 'thumb', None),
-        'art':          getattr(item, 'art', None),
+        'thumb':        strip_artwork_timestamp(getattr(item, 'thumb', None)),
+        'art':          strip_artwork_timestamp(getattr(item, 'art', None)),
         'summary':      getattr(item, 'summary', '') or '',
         'duration':     getattr(item, 'duration', 0) or 0,
         'relativePath': rel.replace(os.sep, '/'),
@@ -341,11 +359,11 @@ def build_manifest_entry(item, rel: str,
             'grandparentTitle':     item.grandparentTitle,
             'grandparentYear':      year,
             'grandparentRatingKey': str(item.grandparentRatingKey) if getattr(item, 'grandparentRatingKey', None) else None,
-            'grandparentThumb':     getattr(item, 'grandparentThumb', None),
-            'grandparentArt':       getattr(item, 'grandparentArt', None),
+            'grandparentThumb':     strip_artwork_timestamp(getattr(item, 'grandparentThumb', None)),
+            'grandparentArt':       strip_artwork_timestamp(getattr(item, 'grandparentArt', None)),
             'parentTitle':          getattr(item, 'parentTitle', None),
             'parentRatingKey':      str(item.parentRatingKey) if item.parentRatingKey is not None else None,
-            'parentThumb':          getattr(item, 'parentThumb', None),
+            'parentThumb':          strip_artwork_timestamp(getattr(item, 'parentThumb', None)),
             'seasonNumber':         item.parentIndex,
             'episodeNumber':        item.index,
         })
