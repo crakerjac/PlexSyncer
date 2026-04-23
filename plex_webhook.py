@@ -26,6 +26,7 @@ import logging
 import os
 import subprocess
 import time
+import threading
 from flask import Flask, request
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -52,6 +53,16 @@ COOLDOWN_SECONDS = 300
 # ── App ────────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
+
+def run_sync():
+    subprocess.run(
+        [
+            '/usr/bin/flock', '-n', LOCK_FILE,
+            VENV_PYTHON, WORKER, '--all-slots',
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 @app.route('/plexhook', methods=['POST'])
 def plexhook():
@@ -100,17 +111,8 @@ def plexhook():
 
     log.info(f'Received event [{event}] for "{title}" — triggering sync')
 
-    # Fire-and-forget: return 200 immediately, sync runs in background.
-    # flock -n acquires a non-blocking lock; if a sync is already running
-    # (via cron or a previous webhook), this invocation exits silently.
-    subprocess.Popen(
-        [
-            '/usr/bin/flock', '-n', LOCK_FILE,
-            VENV_PYTHON, WORKER, '--all-slots',
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    # Fire-and-forget using a thread (prevents zombie processes)
+    threading.Thread(target=run_sync, daemon=True).start()
 
     return 'OK', 200
 
