@@ -42,7 +42,15 @@ from plexapi.video import Show
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 SUBTITLE_EXTS   = {'.srt', '.vtt', '.ass', '.ssa', '.sub'}
-PROTECTED_NAMES = {'_plezy_meta', '.stfolder', '.stversions', '.stignore'}
+PROTECTED_NAMES = {'_plezy_meta', '_optimized', '.stfolder', '.stversions', '.stignore', '.apk'}
+OPTIMIZED_DIR_NAME = '_optimized'
+
+# Video codecs that Android cannot direct-play — same list as plex_optimize.py.
+INCOMPATIBLE_VIDEO_CODECS = {
+    'mpeg4', 'msmpeg4v3', 'msmpeg4v2', 'msmpeg4v1', 'mpeg2video', 'mpeg1video',
+    'wmv3', 'wmv2', 'wmv1', 'vc1', 'theora', 'rv40', 'rv30', 'flv1', 'vp6f',
+    'indeo5', 'cinepak', 'mjpeg', 'prores', 'dnxhd', 'huffyuv',
+}
 
 # Subfolder within each slot directory that contains PlexSyncer-managed files.
 CONFIGS_DIR     = os.path.join(os.path.dirname(__file__), 'configs')
@@ -102,6 +110,21 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(r'^\.+|\.+$', '', name)
     name = name.replace('.', '_')
     return name.strip()
+
+
+def get_item_video_codec(item) -> Optional[str]:
+    """Return the video codec of the lowest-bitrate media version."""
+    try:
+        best = min(
+            item.media,
+            key=lambda m: (
+                m.bitrate or 999_999,
+                m.parts[0].size if m.parts and m.parts[0].size else float('inf'),
+            ),
+        )
+        return getattr(best, 'videoCodec', None)
+    except (IndexError, AttributeError, ValueError):
+        return None
 
 
 def build_relative_path(item, source_ext: str,
@@ -372,6 +395,44 @@ def build_manifest_entry(item, rel: str,
     return e
 
 
+def _write_compat_report(sync_dir: str, optimized: list,
+                         incompatible: list) -> None:
+    """Write _plezy_meta/compat_report.txt summarising codec substitutions."""
+    if not optimized and not incompatible:
+        return
+    meta = os.path.join(sync_dir, '_plezy_meta')
+    os.makedirs(meta, exist_ok=True)
+    path = os.path.join(meta, 'compat_report.txt')
+    now  = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    lines = [
+        'PlexSyncer Compatibility Report',
+        f'Generated : {now}',
+        f'Slot      : {os.path.basename(sync_dir)}',
+        '',
+    ]
+    if optimized:
+        lines.append(f'── Optimized versions used ({len(optimized)}) ──')
+        for item in optimized:
+            label = f'[{item["show"]}] {item["title"]}' if item['show'] else item['title']
+            lines.append(f'  ✅ {label}  [original codec: {item["codec"]}]')
+            lines.append(f'     Optimized file: _optimized/{item["rk"]}.mp4')
+        lines.append('')
+    if incompatible:
+        lines.append(f'── Incompatible, not yet optimized ({len(incompatible)}) ──')
+        lines.append('   Run: python3 plex_optimize.py --all-slots')
+        for item in incompatible:
+            label = f'[{item["show"]}] {item["title"]}' if item['show'] else item['title']
+            lines.append(f'  ⚠️  {label}  [codec: {item["codec"]}]')
+        lines.append('')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+    if incompatible:
+        print(f'  [COMPAT] {len(incompatible)} incompatible file(s) — '
+              f'run plex_optimize.py to fix. See _plezy_meta/compat_report.txt')
+    if optimized:
+        print(f'  [COMPAT] {len(optimized)} item(s) used optimized versions.')
+
+
 def write_manifest(sync_dir: str, server_id: str, server_name: str,
                    entries: list) -> None:
     meta = os.path.join(sync_dir, '_plezy_meta')
@@ -445,7 +506,8 @@ def link_file(src: str, dst: str) -> bool:
 def sync_slot_dir(sync_dir: str, all_items: dict,
                   server_id: str, server_name: str,
                   sub_languages: Optional[list] = None,
-                  sub_forced: bool = False) -> None:
+                  sub_forced: bool = False,
+                  optimized_dir: Optional[str] = None) -> None:
     os.makedirs(sync_dir, exist_ok=True)
 
     exp_video: dict = {}
@@ -470,7 +532,41 @@ def sync_slot_dir(sync_dir: str, all_items: dict,
     print('Linking video files...')
     new_v = skip_v = err_v = 0
     entries = []
+    compat_optimized    = []  # items that used an optimized version
+    compat_incompatible = []  # items still incompatible (no optimized version)
+
     for rel, (item, sp, show_year) in exp_video.items():
+        rk    = str(item.ratingKey)
+        codec = get_item_video_codec(item)
+
+        # Check if an optimized version is available in the shared cache.
+        # Find optimized file by _{rk}.mp4 suffix: 'Show S01E02_293000.mp4'
+        if optimized_dir and os.path.isdir(optimized_dir):
+            opt_file = next(
+                (f for f in os.listdir(optimized_dir)
+                 if f.endswith(f'_{rk}.mp4')
+                 and os.path.getsize(os.path.join(optimized_dir, f)) > 0),
+                None
+            )
+            if opt_file:
+                opt_path = os.path.join(optimized_dir, opt_file)
+                # Rebuild rel with .mp4 extension for the optimized file.
+                rel = build_relative_path(item, 'mp4', show_year=show_year)
+                sp  = opt_path
+                compat_optimized.append({
+                    'title': getattr(item, 'title', rk),
+                    'show':  getattr(item, 'grandparentTitle', None),
+                    'codec': codec,
+                    'rk':    rk,
+                })
+            elif opt_file is None and codec and codec.lower() in INCOMPATIBLE_VIDEO_CODECS:
+                compat_incompatible.append({
+                    'title': getattr(item, 'title', rk),
+                    'show':  getattr(item, 'grandparentTitle', None),
+                    'codec': codec,
+                    'rk':    rk,
+                })
+
         existed = os.path.exists(os.path.join(sync_dir, rel))
         if link_file(sp, os.path.join(sync_dir, rel)):
             if existed:
@@ -499,6 +595,7 @@ def sync_slot_dir(sync_dir: str, all_items: dict,
     if exp_subs:
         print(f'Subs   : {new_s} new, {skip_s} existing, {err_s} errors')
 
+    _write_compat_report(sync_dir, compat_optimized, compat_incompatible)
     write_manifest(sync_dir, server_id, server_name, entries)
 
 
@@ -581,8 +678,11 @@ def run_slot(slot_name: str) -> None:
         print('Nothing to sync.')
         return
 
+    optimized_dir = os.path.join(sync_root, OPTIMIZED_DIR_NAME) \
+                    if plex_cfg.get('transcode_incompatible', False) else None
     sync_slot_dir(sync_dir, all_items, server_id, server_name,
-                  sub_languages=sub_languages, sub_forced=sub_forced)
+                  sub_languages=sub_languages, sub_forced=sub_forced,
+                  optimized_dir=optimized_dir)
     print(f'\nSlot "{slot_name}" complete.')
 
 
