@@ -6,7 +6,8 @@ pip install "streamlit>=1.34" plexapi
 streamlit run sync_ui.py
 """
 
-import os, json, glob, subprocess, sys
+import os, re, json, glob, subprocess, sys, time
+from collections import deque
 from typing import Optional
 import streamlit as st
 
@@ -61,6 +62,15 @@ def label_to_mode_cfg(label: str) -> dict:
     return SYNC_MODE_CONFIGS[idx]
 
 
+def _sort_title(t: str) -> str:
+    """Strip leading articles (The/A/An) for alpha sort comparisons."""
+    lower = t.lower()
+    for prefix in ('the ', 'a ', 'an '):
+        if lower.startswith(prefix):
+            return t[len(prefix):]
+    return t
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # LOCK HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -84,8 +94,7 @@ def _tail_log(n: int = 100) -> str:
     try:
         if os.path.exists(LOG_FILE):
             with open(LOG_FILE, encoding='utf-8', errors='replace') as f:
-                lines = f.readlines()
-            return ''.join(lines[-n:])
+                return ''.join(deque(f, maxlen=n))
     except Exception:
         pass
     return ''
@@ -96,10 +105,12 @@ def _is_locked() -> bool:
     try:
         import fcntl
         fd = open(LOCK_FILE, 'w')
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
-        return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        finally:
+            fd.close()
     except (IOError, OSError):
         return True
 
@@ -295,19 +306,11 @@ def get_section_items(section_key, letter: str = '') -> list:
     if letter == 'All':
         items = all_items
     elif letter == '#':
-        items = [i for i in all_items if i['title'] and i['title'][0].isdigit()]
+        items = [i for i in all_items if i['title'] and not i['title'][0].isalpha()]
     else:
-        # Strip common leading articles for sorting (The, A, An)
-        def sort_title(t):
-            for prefix in ('the ', 'a ', 'an '):
-                if t.lower().startswith(prefix):
-                    return t[len(prefix):]
-            return t
         items = [i for i in all_items
-                 if sort_title(i['title'])[:1].upper() == letter.upper()]
+                 if _sort_title(i['title'])[:1].upper() == letter.upper()]
     st.session_state[cache_key] = items
-    # Invalidate rk_index so it gets rebuilt with the new items
-    st.session_state.pop('_rk_index', None)
     return items
 
 def get_playlists() -> list:
@@ -326,8 +329,7 @@ def get_playlists() -> list:
 
 def _invalidate_library_cache() -> None:
     for key in list(st.session_state.keys()):
-        if key.startswith('section_items_') or key in (
-                'plex_sections', 'plex_playlists', '_rk_index'):
+        if key.startswith('section_items_') or key in ('plex_sections', 'plex_playlists'):
             del st.session_state[key]
 
 
@@ -369,8 +371,6 @@ def _get_rk_index() -> dict:
 # KEY INVARIANT: on_change callbacks update _saved_* IMMEDIATELY whenever any
 # checkbox or selectbox changes. This means even if Streamlit re-renders
 # a widget (e.g. when switching tabs), _saved_* already has the correct value.
-# build_selections_from_widgets() can safely fall back to _saved_* for any
-# item whose widget key is absent.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_saved() -> tuple:
@@ -440,44 +440,6 @@ def switch_slot(slot: str) -> None:
     st.session_state['_saved_shows']     = sel.get('shows', {})
     st.session_state['_loaded_slot']     = slot
     st.session_state['_dirty']           = False
-
-def build_selections_from_widgets(slot: str) -> dict:
-    """
-    Build selections dict for saving.
-    For each item: use widget key if present, else fall back to _saved_*.
-    _saved_* is always current because on_change callbacks update it
-    immediately on every interaction — so the fallback is always correct
-    even for items on other tabs whose widget keys may not exist yet.
-    """
-    s_movies, s_shows, s_playlists = _get_saved()
-    movies, shows, playlists       = {}, {}, {}
-    for section in get_sections():
-        items = st.session_state.get(f'section_items_{section["key"]}', [])
-        for item in items:
-            rk, title = item['ratingKey'], item['title']
-            if section['type'] == 'movie':
-                chk = f'chk_mov_{slot}_{rk}'
-                movies[title] = st.session_state[chk] if chk in st.session_state \
-                                else (title in s_movies)
-            elif section['type'] == 'show':
-                chk  = f'chk_show_{slot}_{rk}'
-                mode = f'mode_show_{slot}_{rk}'
-                if chk in st.session_state:
-                    if st.session_state[chk]:
-                        shows[title] = label_to_mode_cfg(
-                            st.session_state.get(mode, 'Next unwatched'))
-                elif title in s_shows:
-                    shows[title] = s_shows[title]
-    for pl in st.session_state.get('plex_playlists', []):
-        rk, title = pl['ratingKey'], pl['title']
-        chk = f'chk_pl_{slot}_{rk}'
-        playlists[title] = st.session_state[chk] if chk in st.session_state \
-                           else (title in s_playlists)
-    return {
-        'movies':    sorted(t for t, v in movies.items()    if v),
-        'shows':     shows,
-        'playlists': sorted(t for t, v in playlists.items() if v),
-    }
 
 # ── Cart removal helpers ──────────────────────────────────────────────────────
 
@@ -640,7 +602,6 @@ def show_settings() -> None:
                     if st.session_state.get('_loaded_slot') == s:
                         st.session_state.pop('_loaded_slot', None)
                     st.session_state['_toast_msg'] = ('🗑', f'Deleted slot "{s}"')
-                    st.rerun()
         else:
             st.info("No slots yet.")
 
@@ -651,12 +612,13 @@ def show_settings() -> None:
             name = new_name.strip()
             if not name:
                 st.warning("Enter a name.")
+            elif not re.match(r'^[\w\-]+$', name):
+                st.warning("Slot name may only contain letters, numbers, hyphens, and underscores.")
             elif name in slots:            # reuse list already fetched above
                 st.warning(f'"{name}" already exists.')
             else:
                 save_slot_config(name, {'playlists': [], 'movies': [], 'shows': {}})
                 st.session_state['_toast_msg'] = ('✅', f'Created slot "{name}"')
-                st.rerun()
 
     # ── Save ──────────────────────────────────────────────────────────────────
     st.divider()
@@ -876,26 +838,8 @@ def _render_section(section: dict, slot: str) -> None:
     )
 
     if search:
-        # Search across entire library (use cached full list if available)
-        full_cache_key = f'section_items_{sec_key}_ALL'
-        if full_cache_key not in st.session_state:
-            with st.spinner('Searching…'):
-                plex_s   = get_browse_plex()
-                section_s = plex_s.library.sectionByID(sec_key)
-                if section_s.type == 'show':
-                    raw_s = section_s.searchShows()
-                    st.session_state[full_cache_key] = [
-                        {'title': i.title, 'year': getattr(i, 'year', None),
-                         'ratingKey': str(i.ratingKey),
-                         'unwatchedCount': getattr(i, 'unwatchedLeafCount', None)}
-                        for i in raw_s]
-                else:
-                    raw_s = section_s.all()
-                    st.session_state[full_cache_key] = [
-                        {'title': i.title, 'year': getattr(i, 'year', None),
-                         'ratingKey': str(i.ratingKey)}
-                        for i in raw_s]
-        all_items = st.session_state[full_cache_key]
+        with st.spinner('Searching…'):
+            all_items = get_section_items(sec_key, 'All')
         items = [i for i in all_items if search.lower() in i['title'].lower()]
         st.caption(f'{len(items)} result(s) for "{search}"')
     elif not selected:
@@ -994,7 +938,6 @@ def run_sync_live(slot_name: str) -> None:
             st.session_state.pop('_sync_output', None)
             st.session_state.pop('_sync_rc',     None)
             st.session_state['_show_sync'] = False
-            st.session_state.pop('_loaded_slot', None)
             st.rerun()
         return
 
@@ -1090,21 +1033,22 @@ def _check_lock_and_warn() -> bool:
     return False
 
 
-def run_optimize_live(slot_name: str, with_sync: bool = False) -> None:
+def run_optimize_live(slot_name: str) -> None:
     """Run plex_optimize.py for the current slot and stream output.
     Phase 1 (⚡):    dry-run — shows what would be transcoded.
     Phase 2 confirm: real transcode + optional sync (⚡▶).
     """
+    plex_cfg  = get_plex_config()
+    sync_root = plex_cfg.get('sync_root', '')
+
     # Always clear a stale 'complete' status at entry so it never blocks
     # a fresh ⚡ click. The banner Dismiss button is optional — this is
     # the guaranteed cleanup path.
-    _plex_cfg_top = load_plex_config()
-    _sr_top = _plex_cfg_top.get('sync_root', '')
-    if _sr_top and not st.session_state.get('_show_complete_log'):
-        _st_top = _read_optimize_status(_sr_top)
-        if _st_top and _st_top.get('state') == 'complete':
+    if sync_root and not st.session_state.get('_show_complete_log'):
+        _st = _read_optimize_status(sync_root)
+        if _st and _st.get('state') == 'complete':
             try:
-                os.remove(os.path.join(_sr_top, '_optimized', '.status.json'))
+                os.remove(os.path.join(sync_root, '_optimized', '.status.json'))
             except Exception:
                 pass
 
@@ -1118,9 +1062,7 @@ def run_optimize_live(slot_name: str, with_sync: bool = False) -> None:
         and st.session_state.get('_pending_optimize_real') != slot_name
     )
     if st.session_state.get('_show_complete_log') or no_session_output:
-        plex_cfg  = load_plex_config()
-        sync_root = plex_cfg.get('sync_root', '')
-        status    = _read_optimize_status(sync_root)
+        status = _read_optimize_status(sync_root)
         # Only intercept if there is actually a status file with something to show
         if status and status.get('state') in ('running', 'complete'):
             state   = status.get('state', '')
@@ -1150,7 +1092,7 @@ def run_optimize_live(slot_name: str, with_sync: bool = False) -> None:
                     st.session_state.pop('_show_complete_log', None)
                     st.rerun()
                 c3.caption('Auto-refreshing every 5 seconds…')
-                import time; time.sleep(5)
+                time.sleep(5)
                 st.rerun()
                 return
             elif state == 'complete':
@@ -1178,7 +1120,6 @@ def run_optimize_live(slot_name: str, with_sync: bool = False) -> None:
                       '_opt_dry_output', '_opt_dry_rc'):
                 st.session_state.pop(k, None)
             st.session_state['_show_optimize'] = False
-            st.session_state.pop('_loaded_slot', None)
             st.rerun()
         return
 
@@ -1187,36 +1128,38 @@ def run_optimize_live(slot_name: str, with_sync: bool = False) -> None:
         rc    = st.session_state.get('_opt_dry_rc', 0)
         lines = st.session_state['_opt_dry_output']
         state = 'complete' if rc == 0 else 'error'
-        with st.status('🔍 Dry-run complete — review and confirm', state=state,
-                       expanded=True):
-            st.code('\n'.join(lines), language=None)
-
-        st.caption('Choose an action:')
-        c1, c2, c3 = st.columns(3)
-
-        if c1.button('⚡ Optimize only', use_container_width=True,
-                     key='btn_opt_confirm'):
-            if not _check_lock_and_warn():
-                st.session_state.pop('_opt_dry_output', None)
-                st.session_state.pop('_opt_dry_rc', None)
-                st.session_state['_opt_with_sync'] = False
-                st.session_state['_pending_optimize_real'] = slot_name
+        phase2_area = st.empty()
+        with phase2_area.container():
+            with st.status('🔍 Dry-run complete — review and confirm', state=state,
+                           expanded=True):
+                st.code('\n'.join(lines), language=None)
+            st.caption('Choose an action:')
+            c1, c2, c3 = st.columns(3)
+            if c1.button('⚡ Optimize only', use_container_width=True,
+                         key='btn_opt_confirm'):
+                if not _check_lock_and_warn():
+                    phase2_area.empty()
+                    st.session_state.pop('_opt_dry_output', None)
+                    st.session_state.pop('_opt_dry_rc', None)
+                    st.session_state['_opt_with_sync'] = False
+                    st.session_state['_pending_optimize_real'] = slot_name
+                    st.rerun()
+            if c2.button('⚡▶ Optimize & Sync', use_container_width=True,
+                         type='primary', key='btn_opt_sync_confirm'):
+                if not _check_lock_and_warn():
+                    phase2_area.empty()
+                    st.session_state.pop('_opt_dry_output', None)
+                    st.session_state.pop('_opt_dry_rc', None)
+                    st.session_state['_opt_with_sync'] = True
+                    st.session_state['_pending_optimize_real'] = slot_name
+                    st.rerun()
+            if c3.button('← Cancel', use_container_width=True,
+                         key='btn_opt_cancel'):
+                phase2_area.empty()
+                for k in ('_opt_dry_output', '_opt_dry_rc', '_opt_with_sync'):
+                    st.session_state.pop(k, None)
+                st.session_state['_show_optimize'] = False
                 st.rerun()
-
-        if c2.button('⚡▶ Optimize & Sync', use_container_width=True,
-                     type='primary', key='btn_opt_sync_confirm'):
-            if not _check_lock_and_warn():
-                st.session_state.pop('_opt_dry_output', None)
-                st.session_state.pop('_opt_dry_rc', None)
-                st.session_state['_opt_with_sync'] = True
-                st.session_state['_pending_optimize_real'] = slot_name
-                st.rerun()
-
-        if c3.button('← Cancel', use_container_width=True, key='btn_opt_cancel'):
-            for k in ('_opt_dry_output', '_opt_dry_rc', '_opt_with_sync'):
-                st.session_state.pop(k, None)
-            st.session_state['_show_optimize'] = False
-            st.rerun()
         return
 
     # ── Phase 2b: run real optimize (after confirm) ────────────────────────
@@ -1235,9 +1178,7 @@ def run_optimize_live(slot_name: str, with_sync: bool = False) -> None:
             cmd += ['--sync']
 
         # Controls visible during streaming
-        plex_cfg_run  = load_plex_config()
-        sync_root_run = plex_cfg_run.get('sync_root', '')
-        cancel_path   = os.path.join(sync_root_run, '_optimized', '.cancel')
+        cancel_path = os.path.join(sync_root, '_optimized', '.cancel')
         ctrl1, ctrl2, ctrl3 = st.columns([1, 1, 4])
         stop_clicked = ctrl1.button('⏹ Stop', key='btn_run_stop',
                                     help='Stop after current file finishes')
@@ -1353,11 +1294,6 @@ def main():
             st.caption(f"🟢 {admin.friendlyName}")
         else:
             st.caption("🔴 Not connected")
-        _opt_st = _read_optimize_status(load_plex_config().get('sync_root', ''))
-        if _opt_st and _opt_st.get('state') == 'running':
-            _done = _opt_st.get('transcoded', 0)
-            _item = _opt_st.get('current_item', '…')
-            st.caption(f'⚡ {_item} ({_done} done)')
 
     with c_slots:
         if not slots:
@@ -1385,6 +1321,18 @@ def main():
 
     with c_actions:
         dirty = st.session_state.get('_dirty', False)
+        # Disable action buttons while any operation is actively running so that
+        # Streamlit's "running" dimming doesn't mislead users into queuing clicks
+        # that will be silently dropped when the wrong phase renders next.
+        in_operation = bool(
+            st.session_state.get('_show_optimize')
+            or st.session_state.get('_show_sync')
+            or '_opt_output'     in st.session_state
+            or '_opt_dry_output' in st.session_state
+            or '_sync_output'    in st.session_state
+            or (current_slot and
+                st.session_state.get('_pending_optimize_real') == current_slot)
+        )
         b1, b2, b3, b4 = st.columns(4)
 
         if b1.button("⚙", help="Settings", use_container_width=True):
@@ -1392,18 +1340,20 @@ def main():
 
         if current_slot:
             save_icon = "💾●" if dirty else "💾"
-            if b2.button(save_icon, help="Save", use_container_width=True):
+            if b2.button(save_icon, help="Save", use_container_width=True,
+                         disabled=in_operation):
                 n = _do_save(current_slot)
                 st.toast(f'Saved — {n} items', icon='💾')
                 st.rerun()
 
             if b3.button("⚡", help="Optimize (transcode incompatible codecs)",
-                         use_container_width=True):
+                         use_container_width=True, disabled=in_operation):
+                _do_save(current_slot)
                 st.session_state['_pending_optimize'] = current_slot
                 st.rerun()
 
             if b4.button("▶", help="Save & Sync", type="primary",
-                         use_container_width=True):
+                         use_container_width=True, disabled=in_operation):
                 if not _check_lock_and_warn():
                     _do_save(current_slot)
                     st.session_state['_pending_sync'] = current_slot
@@ -1447,6 +1397,7 @@ def main():
         return
 
     # ── Main two-column layout ─────────────────────────────────────────────────
+    _render_status_banner(get_plex_config())
     col_cart, col_browser = st.columns([1, 2.5])
 
     with col_cart:
