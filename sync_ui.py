@@ -10,7 +10,7 @@ import os, json, glob, subprocess, sys
 from typing import Optional
 import streamlit as st
 
-VERSION     = 'v1.2.0'
+VERSION     = 'v1.2.1'
 APP_ICON    = '📼'
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 CONFIGS_DIR = os.path.join(SCRIPT_DIR, 'configs')
@@ -258,11 +258,14 @@ def get_section_items(section_key, letter: str = '') -> list:
     """Fetch items for a section, optionally filtered by first letter.
     Results are cached per section+letter combination.
     letter='' returns nothing (placeholder state).
+    letter='All' returns all titles (shares the _ALL cache with the search box).
     letter='#' returns titles starting with a digit.
     """
     if not letter:
         return []
-    cache_key = f'section_items_{section_key}_{letter}'
+    # 'All' reuses the same full-library cache as the search box
+    cache_key = f'section_items_{section_key}_ALL' if letter == 'All' \
+                else f'section_items_{section_key}_{letter}'
     if cache_key in st.session_state:
         return st.session_state[cache_key]
     plex = get_browse_plex()
@@ -289,7 +292,9 @@ def get_section_items(section_key, letter: str = '') -> list:
             key=lambda x: x['title'].lower()
         )
     # Filter by letter
-    if letter == '#':
+    if letter == 'All':
+        items = all_items
+    elif letter == '#':
         items = [i for i in all_items if i['title'] and i['title'][0].isdigit()]
     else:
         # Strip common leading articles for sorting (The, A, An)
@@ -417,9 +422,17 @@ def _on_playlist_change(rk: str, title: str, slot: str) -> None:
 
 def switch_slot(slot: str) -> None:
     """
-    Reload _saved_* from disk config. Widget keys are namespaced by slot
-    to prevent ghost callbacks, so deleting keys here is no longer needed.
+    Reload _saved_* from disk config and clear stale widget keys for this slot.
+    Widget keys must be cleared so checkboxes re-initialize from the freshly-loaded
+    _saved_* state; otherwise Streamlit keeps the stale session-state values and
+    _do_save (which reads _saved_* directly) silently saves the wrong selections.
     """
+    for key in list(st.session_state.keys()):
+        if (key.startswith(f'chk_show_{slot}_')
+                or key.startswith(f'chk_mov_{slot}_')
+                or key.startswith(f'chk_pl_{slot}_')
+                or key.startswith(f'mode_show_{slot}_')):
+            del st.session_state[key]
     cfg = load_slot_config(slot)
     sel = cfg.get('selections', {})
     st.session_state['_saved_movies']    = set(sel.get('movies', []))
@@ -838,14 +851,14 @@ def _render_section(section: dict, slot: str) -> None:
     sec_type = section['type']
 
     # ── Alpha index ───────────────────────────────────────────────────────
-    letters  = ['#'] + list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+    letters  = ['All', '#'] + list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
     state_key = f'alpha_{sec_key}'
     if state_key not in st.session_state:
         st.session_state[state_key] = ''
 
-    # Render letter buttons in rows of 9
+    # Render letter buttons in rows of 7 (4 rows for All + # + A-Z = 28)
     selected = st.session_state[state_key]
-    row_size = 9
+    row_size = 7
     for row_start in range(0, len(letters), row_size):
         cols = st.columns(row_size)
         for col_idx, letter in enumerate(letters[row_start:row_start + row_size]):
@@ -895,7 +908,8 @@ def _render_section(section: dict, slot: str) -> None:
         if not items:
             st.caption(f'No titles under {selected}.')
             return
-        st.caption(f'{len(items)} title(s) under {selected}')
+        label = 'title(s) total' if selected == 'All' else f'title(s) under {selected}'
+        st.caption(f'{len(items)} {label}')
 
     if sec_type == 'movie':
         cols = st.columns(3)

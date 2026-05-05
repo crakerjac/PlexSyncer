@@ -42,7 +42,7 @@ from plexapi.video import Show
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 SUBTITLE_EXTS   = {'.srt', '.vtt', '.ass', '.ssa', '.sub'}
-PROTECTED_NAMES = {'_plezy_meta', '_optimized', '.stfolder', '.stversions', '.stignore', '.apk'}
+PROTECTED_NAMES = {'_plezy_meta', '_optimized', '.stfolder', '.stversions', '.stignore'}
 OPTIMIZED_DIR_NAME = '_optimized'
 
 # Video codecs that Android cannot direct-play — same list as plex_optimize.py.
@@ -455,7 +455,7 @@ def write_manifest(sync_dir: str, server_id: str, server_name: str,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def is_protected(name: str) -> bool:
-    return name in PROTECTED_NAMES or name.startswith('.')
+    return name in PROTECTED_NAMES or name.startswith('.') or name.endswith('.apk')
 
 
 def prune(sync_dir: str, expected: set) -> int:
