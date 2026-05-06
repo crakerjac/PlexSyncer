@@ -643,7 +643,7 @@ def run_slot(slot_name: str) -> None:
 
     plex = connect(host, token)
 
-    managed_user = plex_cfg.get('managed_user', '').strip()
+    managed_user = (config.get('managed_user', '') or plex_cfg.get('managed_user', '')).strip()
     if managed_user:
         print(f'Switching to managed user "{managed_user}"...', end='', flush=True)
         try:

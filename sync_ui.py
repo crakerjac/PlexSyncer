@@ -11,7 +11,7 @@ from collections import deque
 from typing import Optional
 import streamlit as st
 
-VERSION     = 'v1.2.1'
+VERSION     = 'v1.2.2'
 APP_ICON    = '📼'
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 CONFIGS_DIR = os.path.join(SCRIPT_DIR, 'configs')
@@ -173,9 +173,12 @@ def load_slot_config(slot: str) -> dict:
     return {'slot_name': slot, 'selections': {'playlists': [], 'movies': [], 'shows': {}}}
 
 def save_slot_config(slot: str, selections: dict) -> None:
-    cfg = {'slot_name': slot, 'selections': selections}
+    # Load existing config to preserve fields like managed_user
+    existing = load_slot_config(slot)
+    existing['slot_name']  = slot
+    existing['selections'] = selections
     with open(os.path.join(CONFIGS_DIR, f'{slot}.json'), 'w', encoding='utf-8') as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        json.dump(existing, f, indent=2, ensure_ascii=False)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -201,18 +204,22 @@ def try_connect(host: str, token: str) -> tuple:
         st.session_state.pop('plex_browse', None)
         return False, str(e)
 
-def _apply_managed_user() -> None:
+def _apply_slot_managed_user(slot_user: str) -> None:
+    """Switch plex_browse to slot_user, falling back to global user then admin."""
     admin = st.session_state.get('plex_admin')
     if admin is None:
         return
-    managed = get_plex_config().get('managed_user', '').strip()
-    if managed:
+    user = slot_user.strip() or get_plex_config().get('managed_user', '').strip()
+    if user:
         try:
-            st.session_state['plex_browse'] = admin.switchUser(managed)
+            st.session_state['plex_browse'] = admin.switchUser(user)
             return
         except Exception:
             pass
     st.session_state['plex_browse'] = admin
+
+def _apply_managed_user() -> None:
+    _apply_slot_managed_user('')
 
 def auto_connect() -> None:
     """Run once per session. Connects silently using stored config."""
@@ -426,6 +433,7 @@ def switch_slot(slot: str) -> None:
     Widget keys must be cleared so checkboxes re-initialize from the freshly-loaded
     _saved_* state; otherwise Streamlit keeps the stale session-state values and
     _do_save (which reads _saved_* directly) silently saves the wrong selections.
+    Re-applies the slot's managed user and flushes the library cache when the user changes.
     """
     for key in list(st.session_state.keys()):
         if (key.startswith(f'chk_show_{slot}_')
@@ -433,7 +441,12 @@ def switch_slot(slot: str) -> None:
                 or key.startswith(f'chk_pl_{slot}_')
                 or key.startswith(f'mode_show_{slot}_')):
             del st.session_state[key]
-    cfg = load_slot_config(slot)
+    cfg      = load_slot_config(slot)
+    new_user = cfg.get('managed_user', '').strip()
+    if new_user != st.session_state.get('_browsing_user'):
+        _invalidate_library_cache()
+        _apply_slot_managed_user(new_user)
+        st.session_state['_browsing_user'] = new_user
     sel = cfg.get('selections', {})
     st.session_state['_saved_movies']    = set(sel.get('movies', []))
     st.session_state['_saved_playlists'] = set(sel.get('playlists', []))
@@ -590,15 +603,26 @@ def show_settings() -> None:
 
     # ── Slots ─────────────────────────────────────────────────────────────────
     with tab_slots:
-        slots = list_slots()
+        slots      = list_slots()
+        home_users = get_home_users()
+        user_opts  = ['(main account)'] + home_users
         if slots:
             st.caption(f"{len(slots)} slot{'s' if len(slots) != 1 else ''} configured")
+            h1, h2, h3 = st.columns([3, 3, 1])
+            h1.caption('**Slot**')
+            h2.caption('**Browse as user**')
             for s in slots:
-                c1, c2 = st.columns([6, 1])
+                slot_cfg     = load_slot_config(s)
+                current_user = slot_cfg.get('managed_user', '')
+                sel_idx      = user_opts.index(current_user) \
+                               if current_user in user_opts else 0
+                c1, c2, c3 = st.columns([3, 3, 1])
                 c1.write(s)
-                if c2.button("🗑", key=f'sdlg_del_{s}', help=f'Delete slot "{s}"'):
+                c2.selectbox('User', user_opts, index=sel_idx,
+                             key=f'sdlg_slot_user_{s}',
+                             label_visibility='collapsed')
+                if c3.button("🗑", key=f'sdlg_del_{s}', help=f'Delete slot "{s}"'):
                     os.remove(os.path.join(CONFIGS_DIR, f'{s}.json'))
-                    # Clear _loaded_slot so the deleted slot isn't re-loaded
                     if st.session_state.get('_loaded_slot') == s:
                         st.session_state.pop('_loaded_slot', None)
                     st.session_state['_toast_msg'] = ('🗑', f'Deleted slot "{s}"')
@@ -650,7 +674,25 @@ def show_settings() -> None:
             'transcode_audio_bitrate': st.session_state.get('sdlg_transcode_audio', '256k').strip(),
         })
         _invalidate_config_cache()
-        _apply_managed_user()
+
+        # Save per-slot managed users
+        for s in list_slots():
+            slot_cfg  = load_slot_config(s)
+            key       = f'sdlg_slot_user_{s}'
+            new_user  = st.session_state.get(key, '')
+            slot_cfg['managed_user'] = '' if new_user == '(main account)' else new_user
+            with open(os.path.join(CONFIGS_DIR, f'{s}.json'), 'w', encoding='utf-8') as f:
+                json.dump(slot_cfg, f, indent=2, ensure_ascii=False)
+
+        # Re-apply the correct user for the currently loaded slot
+        loaded = st.session_state.get('_loaded_slot')
+        if loaded:
+            slot_user = load_slot_config(loaded).get('managed_user', '').strip()
+            _apply_slot_managed_user(slot_user)
+            st.session_state['_browsing_user'] = slot_user
+        else:
+            _apply_managed_user()
+
         _invalidate_library_cache()
         st.toast('Settings saved ✓', icon='💾')
         st.rerun()
