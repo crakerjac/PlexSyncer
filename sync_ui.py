@@ -231,8 +231,7 @@ def auto_connect() -> None:
     if not cfg.get('token'):
         return
     ok, msg = try_connect(cfg['host'], cfg['token'])
-    if ok:
-        st.session_state['_startup_toast'] = ('✅', f'Connected to {msg}')
+    # Connection success is shown via the green dot in the header
     # Silently ignore connection failures on startup — user can fix in settings
 
 def get_home_users() -> list:
@@ -1326,7 +1325,7 @@ def main():
     slots = list_slots()
 
     # ── Header ─────────────────────────────────────────────────────────────────
-    c_logo, c_slots, c_actions = st.columns([2, 7, 2])
+    c_logo, c_slots, c_actions = st.columns([2, 6, 2])
 
     with c_logo:
         plex  = get_browse_plex()
@@ -1374,31 +1373,31 @@ def main():
             or (current_slot and
                 st.session_state.get('_pending_optimize_real') == current_slot)
         )
-        b1, b2, b3, b4 = st.columns(4)
-
-        if b1.button("⚙", help="Settings", use_container_width=True):
-            show_settings()
-
         if current_slot:
+            row1_l, row1_r = st.columns(2)
+            row2_l, row2_r = st.columns(2)
             save_icon = "💾●" if dirty else "💾"
-            if b2.button(save_icon, help="Save", use_container_width=True,
-                         disabled=in_operation):
+            if row1_l.button("⚙", help="Settings", use_container_width=True):
+                show_settings()
+            if row1_r.button(save_icon, help="Save", use_container_width=True,
+                             disabled=in_operation):
                 n = _do_save(current_slot)
                 st.toast(f'Saved — {n} items', icon='💾')
                 st.rerun()
-
-            if b3.button("⚡", help="Optimize (transcode incompatible codecs)",
-                         use_container_width=True, disabled=in_operation):
+            if row2_l.button("⚡", help="Optimize (transcode incompatible codecs)",
+                             use_container_width=True, disabled=in_operation):
                 _do_save(current_slot)
                 st.session_state['_pending_optimize'] = current_slot
                 st.rerun()
-
-            if b4.button("▶", help="Save & Sync", type="primary",
-                         use_container_width=True, disabled=in_operation):
+            if row2_r.button("▶", help="Save & Sync", type="primary",
+                             use_container_width=True, disabled=in_operation):
                 if not _check_lock_and_warn():
                     _do_save(current_slot)
                     st.session_state['_pending_sync'] = current_slot
                     st.rerun()
+        else:
+            if st.button("⚙", help="Settings", use_container_width=True):
+                show_settings()
 
     st.divider()
 
