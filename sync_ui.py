@@ -1347,15 +1347,14 @@ def main():
             if hasattr(st, 'segmented_control'):
                 current_slot = st.segmented_control(
                     "Active slot", slots,
-                    default=slots[0],
+                    default=None,
                     key='slot_ctrl',
                     label_visibility='collapsed',
                 )
-                if current_slot is None:
-                    current_slot = slots[0]
             else:
                 current_slot = st.radio(
                     "Active slot", slots,
+                    index=None,
                     horizontal=True,
                     key='slot_radio',
                     label_visibility='collapsed',
