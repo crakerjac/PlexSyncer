@@ -1,7 +1,7 @@
 """
 plex_webhook.py — PlexSyncer Webhook Receiver
 
-Listens for Plex webhook events and triggers plex_hardlink_sync.py --all-slots
+Listens for Plex webhook events and triggers plex_optimize.py --all-slots --sync
 when a media.scrobble event is received (i.e. an item is marked as watched).
 
 This keeps slot manifests current without waiting for the next cron run —
@@ -42,27 +42,30 @@ log = logging.getLogger(__name__)
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 VENV_PYTHON = os.path.join(SCRIPT_DIR, 'venv', 'bin', 'python')
-WORKER      = os.path.join(SCRIPT_DIR, 'plex_hardlink_sync.py')
+WORKER      = os.path.join(SCRIPT_DIR, 'plex_optimize.py')
 LOCK_FILE   = '/tmp/plexsyncer.lock'
 TIME_FILE   = '/tmp/plexsyncer_last_run.txt'
+LOG_FILE    = '/tmp/plexsyncer_optimize.log'
 PORT        = 5001
 
-# Cooldown in seconds (5 minutes)
-COOLDOWN_SECONDS = 300 
+# Cooldown in seconds (10 minutes)
+COOLDOWN_SECONDS = 600 
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
 
 def run_sync():
-    subprocess.run(
-        [
-            '/usr/bin/flock', '-n', LOCK_FILE,
-            VENV_PYTHON, WORKER, '--all-slots',
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    with open(LOG_FILE, 'a') as logf:
+        result = subprocess.run(
+            [
+                '/usr/bin/flock', '-n', LOCK_FILE,
+                VENV_PYTHON, WORKER, '--all-slots', '--sync',
+            ],
+            stdout=logf,
+            stderr=logf,
+        )
+    log.info(f'Optimize+sync finished with exit code {result.returncode}')
 
 @app.route('/plexhook', methods=['POST'])
 def plexhook():
