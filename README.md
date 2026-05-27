@@ -4,6 +4,14 @@
 
 ---
 
+## Background
+
+Plex has supported offline media playback under various names — "Sync" through 2021, then "Downloads" from October 2021 onward. In March 2025, Plex rolled out the "New Plex Experience" redesign, which changed how downloads are managed in a way that broke Smart Playlist sync. Smart Playlists — dynamic, rule-based playlists such as "Last 5 watched movies" — can no longer be used as a download source. Beyond that, even standard downloads are now treated as one-time snapshots: Plex won't automatically rotate content as you watch through it.
+
+PlexSyncer was built to restore that specific functionality: automated, schedule-driven sync that keeps your mobile device stocked with fresh content from your own Plex Media Server — Smart Playlists included. Watch an episode, and the next cron run prunes it and pulls in the next one automatically. It works exclusively against content you host on your own server via the official Plex API.
+
+---
+
 ## Table of Contents
 
 1. [Vision](#1-vision)
