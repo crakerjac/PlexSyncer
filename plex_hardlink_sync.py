@@ -303,11 +303,14 @@ def collect_show_episodes(plex: PlexServer, show_title: str,
 
     mode  = mode_cfg.get('mode', 'next_unwatched')
     count = mode_cfg.get('count', 1)
+    _sf   = mode_cfg.get('season')
+    season_set = ({_sf} if isinstance(_sf, int) else set(_sf)) if _sf else set()
 
     label = {
         'all':            'all episodes',
         'latest':         f'{count} latest',
         'next_unwatched': f'next {count} unwatched',
+        'seasons':        ', '.join(f'S{s:02d}' for s in sorted(season_set)) or '(no seasons)',
     }.get(mode, mode)
 
     print(f'  Show "{show_title}" ({label})...', end='', flush=True)
@@ -319,7 +322,12 @@ def collect_show_episodes(plex: PlexServer, show_title: str,
 
     show_year: Optional[int] = show.year
 
-    if mode == 'all':
+    if mode == 'seasons':
+        if not season_set:
+            print(' [no seasons specified -- skipped]')
+            return {}
+        episodes = [ep for ep in show.episodes() if ep.parentIndex in season_set]
+    elif mode == 'all':
         episodes = show.episodes()
     elif mode == 'latest':
         all_eps  = show.episodes()

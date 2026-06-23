@@ -302,12 +302,18 @@ def collect_items_for_slot(plex: PlexServer, config: dict) -> dict:
 
         mode  = mode_cfg.get('mode', 'next_unwatched')
         count = mode_cfg.get('count', 1)
+        _sf        = mode_cfg.get('season')
+        season_set = ({_sf} if isinstance(_sf, int) else set(_sf)) if _sf else set()
 
         show = _find_show(plex, show_title)
         if show is None:
             continue
 
-        if mode == 'all':
+        if mode == 'seasons':
+            if not season_set:
+                continue
+            episodes = [ep for ep in show.episodes() if ep.parentIndex in season_set]
+        elif mode == 'all':
             episodes = show.episodes()
         elif mode == 'latest':
             all_eps  = show.episodes()

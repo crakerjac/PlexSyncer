@@ -11,7 +11,7 @@ from collections import deque
 from typing import Optional
 import streamlit as st
 
-VERSION     = 'v1.2.2'
+VERSION     = 'v1.3.4'
 APP_ICON    = '📼'
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 CONFIGS_DIR = os.path.join(SCRIPT_DIR, 'configs')
@@ -33,6 +33,7 @@ SYNC_MODE_LABELS = [
     "Next 10 unwatched",
     "Next 15 unwatched",
     "Next 20 unwatched",
+    "Season(s)",
 ]
 SYNC_MODE_CONFIGS = [
     {"mode": "all"},
@@ -45,6 +46,7 @@ SYNC_MODE_CONFIGS = [
     {"mode": "next_unwatched", "count": 10},
     {"mode": "next_unwatched", "count": 15},
     {"mode": "next_unwatched", "count": 20},
+    {"mode": "seasons"},
 ]
 
 def mode_cfg_to_label(cfg) -> str:
@@ -52,6 +54,8 @@ def mode_cfg_to_label(cfg) -> str:
         return "Next unwatched"
     if isinstance(cfg, dict) and 'next' in cfg and 'mode' not in cfg:
         cfg = {'mode': 'next_unwatched', 'count': cfg['next']}
+    if cfg.get('mode') == 'seasons':
+        return "Season(s)"
     for label, c in zip(SYNC_MODE_LABELS, SYNC_MODE_CONFIGS):
         if c == cfg:
             return label
@@ -396,12 +400,21 @@ def _on_movie_change(rk: str, title: str, slot: str) -> None:
     st.session_state['_saved_movies'] = saved_movies
     st.session_state['_dirty']        = True
 
+def _parse_seasons(raw: str) -> list:
+    """Parse a comma-separated season string like '7, 8, 13' into [7, 8, 13]."""
+    return sorted({int(s.strip()) for s in raw.split(',') if s.strip().isdigit()})
+
 def _on_show_change(rk: str, title: str, slot: str) -> None:
     checked     = st.session_state.get(f'chk_show_{slot}_{rk}', False)
     saved_shows = st.session_state.get('_saved_shows', {})
     if checked:
-        label = st.session_state.get(f'mode_show_{slot}_{rk}', 'Next unwatched')
-        saved_shows[title] = label_to_mode_cfg(label)
+        label  = st.session_state.get(f'mode_show_{slot}_{rk}', 'Next unwatched')
+        cfg    = label_to_mode_cfg(label)
+        if cfg.get('mode') == 'seasons':
+            seasons = _parse_seasons(st.session_state.get(f'season_show_{slot}_{rk}', ''))
+            if seasons:
+                cfg['season'] = seasons
+        saved_shows[title] = cfg
     else:
         saved_shows.pop(title, None)
     st.session_state['_saved_shows'] = saved_shows
@@ -411,8 +424,13 @@ def _on_mode_change(rk: str, title: str, slot: str) -> None:
     if not st.session_state.get(f'chk_show_{slot}_{rk}', False):
         return
     label       = st.session_state.get(f'mode_show_{slot}_{rk}', 'Next unwatched')
+    cfg         = label_to_mode_cfg(label)
+    if cfg.get('mode') == 'seasons':
+        seasons = _parse_seasons(st.session_state.get(f'season_show_{slot}_{rk}', ''))
+        if seasons:
+            cfg['season'] = seasons
     saved_shows = st.session_state.get('_saved_shows', {})
-    saved_shows[title] = label_to_mode_cfg(label)
+    saved_shows[title] = cfg
     st.session_state['_saved_shows'] = saved_shows
     st.session_state['_dirty']       = True
 
@@ -438,7 +456,8 @@ def switch_slot(slot: str) -> None:
         if (key.startswith(f'chk_show_{slot}_')
                 or key.startswith(f'chk_mov_{slot}_')
                 or key.startswith(f'chk_pl_{slot}_')
-                or key.startswith(f'mode_show_{slot}_')):
+                or key.startswith(f'mode_show_{slot}_')
+                or key.startswith(f'season_show_{slot}_')):
             del st.session_state[key]
     cfg      = load_slot_config(slot)
     new_user = cfg.get('managed_user', '').strip()
@@ -798,7 +817,11 @@ def render_cart(slot: str) -> None:
         for title, mode_cfg in sorted(s_shows.items()):
             c1, c2, c3 = st.columns([5, 4, 1])
             c1.caption(title)
-            c2.caption(f"_{mode_cfg_to_label(mode_cfg)}_")
+            seasons = mode_cfg.get('season', [])
+            if isinstance(seasons, int):
+                seasons = [seasons]
+            season_str = (' · ' + ', '.join(f'S{s:02d}' for s in seasons)) if seasons else ''
+            c2.caption(f"_{mode_cfg_to_label(mode_cfg)}{season_str}_")
             if c3.button("✕", key=f'rm_show_{slot}_{title}', help="Remove"):
                 remove_from_cart(title, 'show', slot)
                 st.rerun()
@@ -909,7 +932,7 @@ def _render_section(section: dict, slot: str) -> None:
             )
 
     elif sec_type == 'show':
-        h1, h2 = st.columns([3, 2])
+        h1, h2, h3 = st.columns([3, 2, 1])
         h1.caption('**Show**')
         h2.caption('**Sync mode**')
         for item in items:
@@ -919,7 +942,7 @@ def _render_section(section: dict, slot: str) -> None:
             badge_label  = f"{base_label}  ·  {unwatched} unwatched" \
                            if unwatched else base_label
 
-            c1, c2 = st.columns([3, 2])
+            c1, c2, c3 = st.columns([3, 2, 1])
             checked = c1.checkbox(
                 badge_label,
                 key=f'chk_show_{slot}_{rk}',
@@ -927,15 +950,30 @@ def _render_section(section: dict, slot: str) -> None:
                 on_change=_on_show_change, args=(rk, title, slot)
             )
             if checked:
+                saved_cfg = s_shows.get(title, {})
                 c2.selectbox(
                     '##', SYNC_MODE_LABELS,
                     key=f'mode_show_{slot}_{rk}',
                     index=SYNC_MODE_LABELS.index(
-                        mode_cfg_to_label(s_shows.get(title, {}))
+                        mode_cfg_to_label(saved_cfg)
                     ),
                     label_visibility='collapsed',
                     on_change=_on_mode_change, args=(rk, title, slot)
                 )
+                raw_seasons = saved_cfg.get('season', [])
+                if isinstance(raw_seasons, int):
+                    raw_seasons = [raw_seasons]
+                selected_label = st.session_state.get(f'mode_show_{slot}_{rk}',
+                                                       mode_cfg_to_label(saved_cfg))
+                if selected_label == 'Season(s)':
+                    c3.text_input(
+                        '##',
+                        value=', '.join(str(s) for s in raw_seasons),
+                        key=f'season_show_{slot}_{rk}',
+                        label_visibility='collapsed',
+                        placeholder='e.g. 7,8,13',
+                        on_change=_on_mode_change, args=(rk, title, slot)
+                    )
             else:
                 c2.caption('—')
 
