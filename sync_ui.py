@@ -11,7 +11,7 @@ from collections import deque
 from typing import Optional
 import streamlit as st
 
-VERSION     = 'v1.3.4'
+VERSION     = 'v1.3.5'
 APP_ICON    = '📼'
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 CONFIGS_DIR = os.path.join(SCRIPT_DIR, 'configs')
