@@ -690,8 +690,7 @@ def run_slot(slot_name: str) -> None:
     total = len(all_items)
     print(f'\nTotal unique items: {total}')
     if total == 0:
-        print('Nothing to sync.')
-        return
+        print('Nothing to sync. Pruning directory and updating manifest...')
 
     optimized_dir = os.path.join(sync_root, OPTIMIZED_DIR_NAME) \
                     if plex_cfg.get('transcode_incompatible', False) else None
@@ -719,8 +718,7 @@ def run_legacy(args) -> None:
     total = len(all_items)
     print(f'\nTotal unique items: {total}')
     if total == 0:
-        print('Nothing to sync.')
-        return
+        print('Nothing to sync. Pruning directory and updating manifest...')
     # Legacy mode uses --sync-dir directly (no PlexSyncer subfolder added)
     sync_slot_dir(args.sync_dir, all_items, server_id, server_name)
     print('\nSync complete.')
