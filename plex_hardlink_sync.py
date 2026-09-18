@@ -303,11 +303,14 @@ def collect_show_episodes(plex: PlexServer, show_title: str,
 
     mode  = mode_cfg.get('mode', 'next_unwatched')
     count = mode_cfg.get('count', 1)
+    _sf   = mode_cfg.get('season')
+    season_set = ({_sf} if isinstance(_sf, int) else set(_sf)) if _sf else set()
 
     label = {
         'all':            'all episodes',
         'latest':         f'{count} latest',
         'next_unwatched': f'next {count} unwatched',
+        'seasons':        ', '.join(f'S{s:02d}' for s in sorted(season_set)) or '(no seasons)',
     }.get(mode, mode)
 
     print(f'  Show "{show_title}" ({label})...', end='', flush=True)
@@ -319,7 +322,12 @@ def collect_show_episodes(plex: PlexServer, show_title: str,
 
     show_year: Optional[int] = show.year
 
-    if mode == 'all':
+    if mode == 'seasons':
+        if not season_set:
+            print(' [no seasons specified -- skipped]')
+            return {}
+        episodes = [ep for ep in show.episodes() if ep.parentIndex in season_set]
+    elif mode == 'all':
         episodes = show.episodes()
     elif mode == 'latest':
         all_eps  = show.episodes()
@@ -462,6 +470,9 @@ def prune(sync_dir: str, expected: set) -> int:
     removed = 0
     for root, dirs, files in os.walk(sync_dir, topdown=False):
         dirs[:] = [d for d in dirs if not is_protected(d)]
+        top = os.path.relpath(root, sync_dir).split(os.sep)[0]
+        if top != '.' and is_protected(top):
+            continue
         for fname in files:
             if is_protected(fname):
                 continue
@@ -516,12 +527,27 @@ def sync_slot_dir(sync_dir: str, all_items: dict,
     for rk, tup in all_items.items():
         item, sp, ext = tup[0], tup[1], tup[2]
         show_year     = tup[3] if len(tup) > 3 else None
+        orig_sp       = sp   # always use original path for subtitle discovery
+
+        # Resolve optimized version here so rel — and therefore all_expected —
+        # uses the correct extension (.mp4) before pruning runs.
+        if optimized_dir and os.path.isdir(optimized_dir):
+            opt_file = next(
+                (f for f in os.listdir(optimized_dir)
+                 if f.endswith(f'_{rk}.mp4')
+                 and os.path.getsize(os.path.join(optimized_dir, f)) > 0),
+                None
+            )
+            if opt_file:
+                sp  = os.path.join(optimized_dir, opt_file)
+                ext = 'mp4'
+
         rel = build_relative_path(item, ext, show_year=show_year)
         if rel in exp_video:
             print(f'  [WARNING] Collision "{rel}" -- keeping first.')
             continue
         exp_video[rel] = (item, sp, show_year)
-        for sub_src, suffix in find_subtitle_sidecars(sp, sub_languages, sub_forced):
+        for sub_src, suffix in find_subtitle_sidecars(orig_sp, sub_languages, sub_forced):
             exp_subs[build_subtitle_dest(rel, suffix)] = sub_src
 
     all_expected = set(exp_video) | set(exp_subs)
@@ -539,33 +565,22 @@ def sync_slot_dir(sync_dir: str, all_items: dict,
         rk    = str(item.ratingKey)
         codec = get_item_video_codec(item)
 
-        # Check if an optimized version is available in the shared cache.
-        # Find optimized file by _{rk}.mp4 suffix: 'Show S01E02_293000.mp4'
-        if optimized_dir and os.path.isdir(optimized_dir):
-            opt_file = next(
-                (f for f in os.listdir(optimized_dir)
-                 if f.endswith(f'_{rk}.mp4')
-                 and os.path.getsize(os.path.join(optimized_dir, f)) > 0),
-                None
-            )
-            if opt_file:
-                opt_path = os.path.join(optimized_dir, opt_file)
-                # Rebuild rel with .mp4 extension for the optimized file.
-                rel = build_relative_path(item, 'mp4', show_year=show_year)
-                sp  = opt_path
-                compat_optimized.append({
-                    'title': getattr(item, 'title', rk),
-                    'show':  getattr(item, 'grandparentTitle', None),
-                    'codec': codec,
-                    'rk':    rk,
-                })
-            elif opt_file is None and codec and codec.lower() in INCOMPATIBLE_VIDEO_CODECS:
-                compat_incompatible.append({
-                    'title': getattr(item, 'title', rk),
-                    'show':  getattr(item, 'grandparentTitle', None),
-                    'codec': codec,
-                    'rk':    rk,
-                })
+        # Classify for compat report — sp is already the optimized path if one
+        # was found during the first loop above.
+        if optimized_dir and sp.startswith(optimized_dir):
+            compat_optimized.append({
+                'title': getattr(item, 'title', rk),
+                'show':  getattr(item, 'grandparentTitle', None),
+                'codec': codec,
+                'rk':    rk,
+            })
+        elif codec and codec.lower() in INCOMPATIBLE_VIDEO_CODECS:
+            compat_incompatible.append({
+                'title': getattr(item, 'title', rk),
+                'show':  getattr(item, 'grandparentTitle', None),
+                'codec': codec,
+                'rk':    rk,
+            })
 
         existed = os.path.exists(os.path.join(sync_dir, rel))
         if link_file(sp, os.path.join(sync_dir, rel)):
@@ -675,8 +690,7 @@ def run_slot(slot_name: str) -> None:
     total = len(all_items)
     print(f'\nTotal unique items: {total}')
     if total == 0:
-        print('Nothing to sync.')
-        return
+        print('Nothing to sync. Pruning directory and updating manifest...')
 
     optimized_dir = os.path.join(sync_root, OPTIMIZED_DIR_NAME) \
                     if plex_cfg.get('transcode_incompatible', False) else None
@@ -704,8 +718,7 @@ def run_legacy(args) -> None:
     total = len(all_items)
     print(f'\nTotal unique items: {total}')
     if total == 0:
-        print('Nothing to sync.')
-        return
+        print('Nothing to sync. Pruning directory and updating manifest...')
     # Legacy mode uses --sync-dir directly (no PlexSyncer subfolder added)
     sync_slot_dir(args.sync_dir, all_items, server_id, server_name)
     print('\nSync complete.')
