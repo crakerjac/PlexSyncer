@@ -12,7 +12,7 @@ from collections import deque
 from typing import Optional
 import streamlit as st
 
-VERSION     = 'v1.4.0'
+VERSION     = 'v1.4.1'
 APP_ICON    = '📼'
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 CONFIGS_DIR = os.path.join(SCRIPT_DIR, 'configs')
@@ -79,6 +79,17 @@ def _sort_title(t: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 # LOCK HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _write_cancel(cancel_path: str) -> None:
+    """Create the cancel sentinel. Used as a button on_click callback so the
+    click is honored even when the rerun it triggers no longer renders the
+    button (the streaming view is only drawn once per launch)."""
+    try:
+        os.makedirs(os.path.dirname(cancel_path), exist_ok=True)
+        open(cancel_path, 'w').close()
+    except Exception:
+        pass
+
 
 def _pid_is_optimizer(pid) -> bool:
     """True only if pid is alive AND is actually plex_optimize.py.
@@ -1129,11 +1140,18 @@ def _render_status_banner(plex_cfg: dict) -> None:
                 pass
             st.rerun()
     elif state == 'complete':
-        failed = status.get('final_failed', 0)
-        icon   = '✅' if not failed else '⚠️'
-        msg    = f'{icon} Optimization complete'
+        failed    = status.get('final_failed', 0)
+        canceled  = bool(status.get('cancelled'))
+        not_done  = status.get('final_cancelled', 0) if canceled else 0
+        icon      = '⏹' if canceled else ('✅' if not failed else '⚠️')
+        msg       = f'{icon} Optimization {"canceled" if canceled else "complete"}'
+        details   = []
+        if not_done:
+            details.append(f'{not_done} item(s) not optimized')
         if failed:
-            msg += f' — {failed} item(s) failed (see log)'
+            details.append(f'{failed} item(s) failed')
+        if details:
+            msg += ' — ' + ', '.join(details) + ' (see log)'
         c1, c2, c3 = st.columns([2, 1, 3])
         c1.success(msg)
         if c2.button('View log', key='btn_banner_log'):
@@ -1208,7 +1226,7 @@ def run_optimize_live(slot_name: str) -> None:
                     st.warning('⏹ Cancel requested — waiting for current item to finish…')
                 c1, c2, c3 = st.columns([1, 1, 4])
                 if c1.button('⏹ Stop', key='btn_status_cancel', type='secondary',
-                             help='Stop after current file finishes'):
+                             help='Stop immediately (kills the current encode)'):
                     try:
                         os.makedirs(os.path.dirname(cancel_path), exist_ok=True)
                         open(cancel_path, 'w').close()
@@ -1225,7 +1243,8 @@ def run_optimize_live(slot_name: str) -> None:
                 st.rerun()
                 return
             elif state == 'complete':
-                st.subheader('✅ Optimization complete')
+                st.subheader('⏹ Optimization canceled' if status.get('cancelled')
+                             else '✅ Optimization complete')
                 st.code(_tail_log(200), language=None)
                 if st.button('← Back', key='btn_status_back'):
                     st.session_state['_show_optimize'] = False
@@ -1238,14 +1257,15 @@ def run_optimize_live(slot_name: str) -> None:
     if '_opt_output' in st.session_state:
         rc    = st.session_state.get('_opt_rc', 0)
         lines = st.session_state['_opt_output']
-        label = ('✅ Optimize & Sync complete' if st.session_state.get('_opt_with_sync')
+        label = ('⏹ Optimize canceled' if st.session_state.get('_opt_cancelled')
+                 else '✅ Optimize & Sync complete' if st.session_state.get('_opt_with_sync')
                  else '✅ Optimize complete') if rc == 0 \
                 else f'❌ Failed (exit {rc})'
         state = 'complete' if rc == 0 else 'error'
         with st.status(label, state=state, expanded=True):
             st.code('\n'.join(lines), language=None)
         if st.button('← Back to configuration', key='btn_opt_back'):
-            for k in ('_opt_output', '_opt_rc', '_opt_with_sync',
+            for k in ('_opt_output', '_opt_rc', '_opt_with_sync', '_opt_cancelled',
                       '_opt_dry_output', '_opt_dry_rc'):
                 st.session_state.pop(k, None)
             st.session_state['_show_optimize'] = False
@@ -1309,16 +1329,11 @@ def run_optimize_live(slot_name: str) -> None:
         # Controls visible during streaming
         cancel_path = os.path.join(sync_root, '_optimized', '.cancel')
         ctrl1, ctrl2, ctrl3 = st.columns([1, 1, 4])
-        stop_clicked = ctrl1.button('⏹ Stop', key='btn_run_stop',
-                                    help='Stop after current file finishes')
+        ctrl1.button('⏹ Stop', key='btn_run_stop',
+                     help='Stop immediately (kills the current encode)',
+                     on_click=_write_cancel, args=(cancel_path,))
         back_clicked = ctrl2.button('← Main', key='btn_run_back',
                                     help='Return to main (transcode continues in background)')
-        if stop_clicked:
-            try:
-                os.makedirs(os.path.dirname(cancel_path), exist_ok=True)
-                open(cancel_path, 'w').close()
-            except Exception:
-                pass
         if back_clicked:
             st.session_state['_show_optimize'] = False
             st.rerun()
@@ -1334,8 +1349,12 @@ def run_optimize_live(slot_name: str) -> None:
                 lines.append(raw.rstrip())
                 output.code('\n'.join(lines), language=None)
             proc.wait()
+            _fin = _read_optimize_status(sync_root) or {}
+            was_cancelled = bool(_fin.get('cancelled'))
             ok_label = '✅ Optimize & Sync complete' if do_sync \
                        else '✅ Optimize complete'
+            if was_cancelled:
+                ok_label = '⏹ Optimize canceled'
             if proc.returncode == 0:
                 status.update(label=ok_label, state='complete', expanded=True)
             else:
@@ -1345,6 +1364,7 @@ def run_optimize_live(slot_name: str) -> None:
             st.session_state.pop(f'_dir_size_{slot_name}', None)
         st.session_state['_opt_output'] = lines
         st.session_state['_opt_rc']     = proc.returncode
+        st.session_state['_opt_cancelled'] = was_cancelled
         st.rerun()
         return
 
