@@ -7,11 +7,12 @@ streamlit run sync_ui.py
 """
 
 import os, re, json, glob, subprocess, sys, time
+from datetime import datetime, timezone
 from collections import deque
 from typing import Optional
 import streamlit as st
 
-VERSION     = 'v1.3.6'
+VERSION     = 'v1.4.0'
 APP_ICON    = '📼'
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 CONFIGS_DIR = os.path.join(SCRIPT_DIR, 'configs')
@@ -79,18 +80,52 @@ def _sort_title(t: str) -> str:
 # LOCK HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _pid_is_optimizer(pid) -> bool:
+    """True only if pid is alive AND is actually plex_optimize.py.
+    The cmdline check guards against PID reuse after a reboot."""
+    try:
+        pid = int(pid)
+        with open(f'/proc/{pid}/cmdline', 'rb') as f:
+            return b'plex_optimize' in f.read()
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def _read_optimize_status(sync_root: str) -> Optional[dict]:
-    """Read the optimizer status file if it exists."""
+    """Read the optimizer status file if it exists.
+
+    If it says 'running' but the owning process is gone (reboot, crash,
+    kill -9), mark it 'interrupted' and remove any stale cancel sentinel so
+    the UI never waits on a process that no longer exists.
+    """
     if not sync_root:
         return None
     path = os.path.join(sync_root, '_optimized', '.status.json')
     try:
-        if os.path.exists(path):
-            with open(path) as f:
-                return json.load(f)
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            status = json.load(f)
     except Exception:
-        pass
-    return None
+        return None
+
+    if status.get('state') == 'running':
+        pid = status.get('pid')
+        alive = _pid_is_optimizer(pid) if pid else _is_locked()
+        if not alive:
+            status['state']        = 'interrupted'
+            status['current_item'] = 'Interrupted (process is no longer running)'
+            status['finished']     = datetime.now(timezone.utc).isoformat()
+            try:
+                with open(path, 'w') as f:
+                    json.dump(status, f, indent=2)
+            except Exception:
+                pass
+            try:
+                os.remove(os.path.join(sync_root, '_optimized', '.cancel'))
+            except OSError:
+                pass
+    return status
 
 
 def _tail_log(n: int = 100) -> str:
@@ -1078,6 +1113,21 @@ def _render_status_banner(plex_cfg: dict) -> None:
             st.session_state.pop('_opt_output', None)
             st.rerun()
         c2.empty()
+    elif state == 'interrupted':
+        c1, c2, c3 = st.columns([3, 1, 2])
+        c1.warning('Last optimization was interrupted (reboot or crash). '
+                   'Finished files are kept; re-run to resume.', icon='⚠️')
+        if c2.button('View log', key='btn_banner_int_log'):
+            st.session_state['_show_optimize'] = True
+            st.session_state['_show_complete_log'] = True
+            st.rerun()
+        if c3.button('Dismiss', key='btn_banner_int_dismiss'):
+            try:
+                os.remove(os.path.join(plex_cfg.get('sync_root', ''),
+                                       '_optimized', '.status.json'))
+            except Exception:
+                pass
+            st.rerun()
     elif state == 'complete':
         failed = status.get('final_failed', 0)
         icon   = '✅' if not failed else '⚠️'
@@ -1125,7 +1175,7 @@ def run_optimize_live(slot_name: str) -> None:
     # the guaranteed cleanup path.
     if sync_root and not st.session_state.get('_show_complete_log'):
         _st = _read_optimize_status(sync_root)
-        if _st and _st.get('state') == 'complete':
+        if _st and _st.get('state') in ('complete', 'interrupted'):
             try:
                 os.remove(os.path.join(sync_root, '_optimized', '.status.json'))
             except Exception:

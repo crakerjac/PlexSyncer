@@ -33,7 +33,7 @@ automatically uses these optimized versions when linking files to sync slots.
 
 from __future__ import annotations
 
-import os, re, json, glob, argparse, subprocess, shutil, sys
+import os, re, json, glob, argparse, subprocess, shutil, sys, atexit, signal
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -373,20 +373,50 @@ def _rk_from_opt_filename(filename: str) -> Optional[str]:
     return None
 
 
+_CANCEL_PATH: Optional[str] = None  # set in main() for real (non-dry) runs
+
+
+def _cancel_requested() -> bool:
+    return bool(_CANCEL_PATH) and os.path.exists(_CANCEL_PATH)
+
+
 def _run_ffmpeg(cmd: list, dst: str) -> bool:
-    """Run an ffmpeg command, clean up on failure. Returns True on success."""
+    """Run ffmpeg writing to dst. Polls for the cancel sentinel and kills
+    ffmpeg if it appears. Removes dst on any failure/cancel.
+    Returns True on success."""
+    import tempfile
     try:
-        result = subprocess.run(cmd, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True)
-        if result.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
-            size_mb = os.path.getsize(dst) / 1024 / 1024
-            print(f'    Done — {size_mb:.1f} MB')
-            return True
-        # Non-zero exit — always remove output (even partial files) so
-        # the next tier starts clean and doesn't find a corrupt file.
-        lines = [l for l in result.stdout.splitlines() if l.strip()]
-        for line in lines[-5:]:
-            print(f'    {line}')
+        with tempfile.TemporaryFile(mode='w+', encoding='utf-8',
+                                    errors='replace') as out:
+            proc = subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT)
+            cancelled = False
+            while True:
+                try:
+                    proc.wait(timeout=1)
+                    break
+                except subprocess.TimeoutExpired:
+                    if _cancel_requested():
+                        cancelled = True
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait()
+                        break
+            if (not cancelled and proc.returncode == 0
+                    and os.path.exists(dst) and os.path.getsize(dst) > 0):
+                size_mb = os.path.getsize(dst) / 1024 / 1024
+                print(f'    Done — {size_mb:.1f} MB')
+                return True
+            if cancelled:
+                print('    [CANCELLED] ffmpeg stopped, partial file removed.')
+            else:
+                out.seek(0)
+                lines = [l for l in out.read().splitlines() if l.strip()]
+                for line in lines[-5:]:
+                    print(f'    {line}')
+        # Failure or cancel — never leave a partial file behind.
         try:
             if os.path.exists(dst):
                 os.remove(dst)
@@ -418,6 +448,8 @@ def transcode_file(
     so we skip the full VAAPI pipeline and go straight to encode-only.
     """
     os.makedirs(os.path.dirname(dst), exist_ok=True)
+    final_dst = dst
+    dst = final_dst + '.part'   # only renamed to final_dst on success
     cpu_cores = os.cpu_count() or 4
 
     common_audio = [
@@ -438,7 +470,10 @@ def transcode_file(
             '-global_quality', str(quality),
         ] + common_audio + ['-f', 'mp4', dst]
         if _run_ffmpeg(cmd1, dst):
+            os.replace(dst, final_dst)
             return True
+        if _cancel_requested():
+            return False
 
     print('    VAAPI failed — falling back to software encoding (libx264)...', flush=True)
     cmd2 = [
@@ -450,7 +485,10 @@ def transcode_file(
         '-preset', 'fast',
         '-threads', str(cpu_cores),
     ] + common_audio + ['-f', 'mp4', dst]
-    return _run_ffmpeg(cmd2, dst)
+    if _run_ffmpeg(cmd2, dst):
+        os.replace(dst, final_dst)
+        return True
+    return False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -712,6 +750,18 @@ def main() -> None:
                 print('[INFO] Cleared leftover cancel sentinel from previous run.')
             except Exception:
                 pass
+        global _CANCEL_PATH
+        _CANCEL_PATH = cancel_path
+        # Remove partial encodes left by a crash/reboot/kill
+        _odir = os.path.join(sync_root, OPTIMIZED_DIR_NAME)
+        if os.path.isdir(_odir):
+            for _f in os.listdir(_odir):
+                if _f.endswith('.mp4.part'):
+                    try:
+                        os.remove(os.path.join(_odir, _f))
+                        print(f'[INFO] Removed leftover partial file: {_f}')
+                    except OSError:
+                        pass
         # Tee stdout to log file so UI can tail it after a page refresh
         sys.stdout = Tee(LOG_FILE)
         # Write initial status
@@ -728,6 +778,21 @@ def main() -> None:
             log_file=LOG_FILE,
             with_sync=args.sync,
         )
+        # If we die for any reason other than a clean finish (exception,
+        # SIGTERM from shutdown), don't leave state='running' behind.
+        def _mark_interrupted():
+            st_now = read_status(sync_root)
+            if st_now and st_now.get('state') == 'running' \
+                    and st_now.get('pid') == os.getpid():
+                write_status(sync_root, state='interrupted',
+                             current_item='Interrupted',
+                             finished=datetime.now(timezone.utc).isoformat())
+                try:
+                    os.remove(os.path.join(sync_root, OPTIMIZED_DIR_NAME, '.cancel'))
+                except OSError:
+                    pass
+        atexit.register(_mark_interrupted)
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
     results     = []
     active_keys = set()  # all ratingKeys seen across ALL slots (for cleanup)
