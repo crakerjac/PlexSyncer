@@ -36,7 +36,7 @@ PlexSyncer was built to restore that specific functionality: automated, schedule
 ## 1. Vision
 
 PlexSyncer automates the selection, hard-linking, and cleanup of Plex media content into
-slot-specific directories that are transferred to mobile devices via rclone, Syncthing, or
+slot-specific directories that are transferred to mobile devices via rclone ([Round Sync](https://github.com/newhinton/Round-Sync) on Android), Syncthing, or
 any file sync tool of your choice. A forked build of the Plezy Android app reads a
 `manifest.json` sidecar to register synced files as offline-available without requiring a
 Plex connection on the phone.
@@ -114,7 +114,7 @@ only operates on the `PlexSyncer` folder — it never affects native downloads.
 | `sync_ui.py` | Python / Streamlit | Web UI for slot configuration and sync triggering |
 | `plex_webhook.py` | Python / Flask | Optional webhook receiver: triggers sync on Plex events |
 | Plezy fork | Dart / Flutter | Android app: manifest import, scan button, artwork fetch |
-| rclone / Round Sync | — | File transport to phone (one-way, user-configured) |
+| rclone /  Sync | — | File transport to phone (one-way, user-configured) |
 
 ### Slot Model
 
@@ -248,7 +248,7 @@ for files that have since been removed by rclone.
 | `type` | all | `"episode"` or `"movie"` |
 | `title` | all | Display title |
 | `thumb` | all | Server-relative poster path; fetched lazily by Plezy |
-| `art` | all | Server-relative background/banner path; fetched lazily |
+| `art` | all | Server-relative backg/banner path; fetched lazily |
 | `summary` | all | Overview text shown on detail screen |
 | `duration` | all | Milliseconds; shown in duration badge |
 | `relativePath` | all | Path relative to slot dir; used to resolve SAF URI |
@@ -256,7 +256,7 @@ for files that have since been removed by rclone.
 | `grandparentRatingKey` | episode | Show's Plex ID; used for DB queries and artwork |
 | `grandparentTitle` | episode | Show title |
 | `grandparentThumb` | episode | Show poster path |
-| `grandparentArt` | episode | Show background/banner path |
+| `grandparentArt` | episode | Show backg/banner path |
 | `grandparentYear` | episode | Show year (for show stub metadata) |
 | `parentRatingKey` | episode | Season's Plex ID |
 | `parentTitle` | episode | Season title |
@@ -475,7 +475,7 @@ is configured in Plezy settings. Tapping it:
 3. Skips items already registered in the database (idempotent)
 4. Registers new items as completed downloads with full metadata
 5. Fetches artwork from the Plex server immediately (if online), including show poster
-   and background banner — deduplicates show artwork to one fetch per show
+   and backg banner — deduplicates show artwork to one fetch per show
 6. Prunes DB records for files that were in the PlexSyncer folder on a previous scan
    but are no longer in the manifest (removed by rclone / watched and rotated out)
 
@@ -593,7 +593,7 @@ PlexSyncer is not opinionated about how files get to your phone.
 
 ### rclone + Round Sync (Recommended)
 
-[rclone](https://rclone.org/) on the server with [Round Sync](https://github.com/roundsync/roundsync)
+[rclone](https://rclone.org/) on the server with [Round Sync](https://github.com/newhinton/Round-Sync)
 on Android. Significantly faster than Syncthing for large media files.
 
 ```bash

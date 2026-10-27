@@ -154,17 +154,28 @@ def read_status(sync_root: str) -> Optional[dict]:
 
 
 class Tee:
-    """Write to both stdout and a log file simultaneously."""
+    """Write to both stdout and a log file simultaneously.
+
+    If stdout goes away (e.g. the UI that launched us stopped reading the
+    pipe), keep logging to the file instead of crashing mid-transcode."""
     def __init__(self, log_path: str):
         self._log = open(log_path, 'w', encoding='utf-8', buffering=1)
         self._stdout = sys.stdout
 
     def write(self, data):
-        self._stdout.write(data)
+        if self._stdout is not None:
+            try:
+                self._stdout.write(data)
+            except (BrokenPipeError, OSError, ValueError):
+                self._stdout = None
         self._log.write(data)
 
     def flush(self):
-        self._stdout.flush()
+        if self._stdout is not None:
+            try:
+                self._stdout.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                self._stdout = None
         self._log.flush()
 
     def close(self):
@@ -374,10 +385,49 @@ def _rk_from_opt_filename(filename: str) -> Optional[str]:
 
 
 _CANCEL_PATH: Optional[str] = None  # set in main() for real (non-dry) runs
+_FFMPEG_PROC = None                 # live ffmpeg Popen, if any
+_FFMPEG_DST: Optional[str] = None   # its output (.part) path
+
+
+def _kill_ffmpeg():
+    """Stop any running ffmpeg and remove its partial output.
+    Registered with atexit so an optimizer crash or SIGTERM never leaves an
+    orphaned ffmpeg encoding in the background."""
+    proc = _FFMPEG_PROC
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        except Exception:
+            pass
+    if _FFMPEG_DST and os.path.exists(_FFMPEG_DST) and (proc is None or proc.poll() is not None):
+        try:
+            os.remove(_FFMPEG_DST)
+        except OSError:
+            pass
+
+
+atexit.register(_kill_ffmpeg)
+
+
+_CANCELLED = False  # latched once a cancel is seen; the sentinel file is only
+                    # removed at the very end of the run so every slot sees it
 
 
 def _cancel_requested() -> bool:
     return bool(_CANCEL_PATH) and os.path.exists(_CANCEL_PATH)
+
+
+def _check_cancel() -> bool:
+    """Latch and return whether the user asked us to stop."""
+    global _CANCELLED
+    if _cancel_requested():
+        _CANCELLED = True
+    return _CANCELLED
 
 
 def _run_ffmpeg(cmd: list, dst: str) -> bool:
@@ -388,7 +438,9 @@ def _run_ffmpeg(cmd: list, dst: str) -> bool:
     try:
         with tempfile.TemporaryFile(mode='w+', encoding='utf-8',
                                     errors='replace') as out:
+            global _FFMPEG_PROC, _FFMPEG_DST
             proc = subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT)
+            _FFMPEG_PROC, _FFMPEG_DST = proc, dst
             cancelled = False
             while True:
                 try:
@@ -404,6 +456,7 @@ def _run_ffmpeg(cmd: list, dst: str) -> bool:
                             proc.kill()
                             proc.wait()
                         break
+            _FFMPEG_PROC = _FFMPEG_DST = None
             if (not cancelled and proc.returncode == 0
                     and os.path.exists(dst) and os.path.getsize(dst) > 0):
                 size_mb = os.path.getsize(dst) / 1024 / 1024
@@ -556,20 +609,16 @@ def optimize_slot(slot_name: str, plex: PlexServer, plex_cfg: dict,
             print(f'  ⚠ Would transcode: {label}  [{codec}]')
             continue
 
-        # Check for cancel sentinel before starting next item
+        # Once cancelled, keep walking the list WITHOUT transcoding. This lets
+        # us report exactly how many items were left unoptimized, and records
+        # every item as active so cache cleanup can't mistake it for stale.
         if sync_root:
-            cancel_path = os.path.join(sync_root, OPTIMIZED_DIR_NAME, '.cancel')
-            if os.path.exists(cancel_path):
-                print('\n[CANCELLED] Cancel requested — stopping after current item.')
-                try:
-                    os.remove(cancel_path)
-                except Exception:
-                    pass
-                write_status(sync_root, state='complete',
-                             current_item='Cancelled',
-                             finished=datetime.now(timezone.utc).isoformat(),
-                             final_failed=len(failed))
-                break
+            _was_cancelled = _CANCELLED
+            if _check_cancel():
+                if not _was_cancelled:
+                    print('\n[CANCELLED] Cancel requested — stopping.')
+                print(f'  ↷ Not optimized (canceled): {label}  [{codec}]')
+                continue
 
         # Transcode
         print(f'  ⚡ Transcoding: {label}  [{codec}]')
@@ -589,6 +638,8 @@ def optimize_slot(slot_name: str, plex: PlexServer, plex_cfg: dict,
         ok = transcode_file(src_path, opt_path, vaapi_device, quality, audio_bitrate)
         if ok:
             transcoded.append({'rk': rk, 'title': label, 'codec': codec})
+        elif _check_cancel():
+            pass    # killed by Stop — neither transcoded nor failed
         else:
             failed.append({'rk': rk, 'title': label, 'codec': codec})
 
@@ -600,6 +651,10 @@ def optimize_slot(slot_name: str, plex: PlexServer, plex_cfg: dict,
         'transcoded':  transcoded,
         'failed':      failed,
         'would_do':    incompatible if dry_run else [],
+        'cancelled':   [] if dry_run else [
+            i for i in incompatible
+            if i['rk'] not in {t['rk'] for t in transcoded + failed}
+        ] if _CANCELLED else [],
     }
 
 
@@ -640,6 +695,9 @@ def print_summary(results: list, dry_run: bool) -> None:
         print(f'  Newly transcoded              : {total_transcoded}')
         if total_failed:
             print(f'  Failed                        : {total_failed}  ← check output above')
+        if _CANCELLED:
+            n_can = sum(len(r.get('cancelled', [])) for r in results)
+            print(f'  Not optimized (canceled)      : {n_can}')
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -775,6 +833,8 @@ def main() -> None:
             total=0,  # updated per slot
             transcoded=0,
             failed=0,
+            cancelled=False,
+            final_cancelled=0,
             log_file=LOG_FILE,
             with_sync=args.sync,
         )
@@ -846,8 +906,10 @@ def main() -> None:
         write_status(sync_root,
             state='complete',
             finished=datetime.now(timezone.utc).isoformat(),
-            current_item='Done',
+            current_item='Cancelled' if _CANCELLED else 'Done',
             final_failed=total_failed,
+            cancelled=_CANCELLED,
+            final_cancelled=sum(len(r.get('cancelled', [])) for r in results),
         )
         cancel_path = os.path.join(sync_root, OPTIMIZED_DIR_NAME, '.cancel')
         if os.path.exists(cancel_path):
@@ -857,7 +919,9 @@ def main() -> None:
                 pass
 
     # Chain into sync if requested (lock is still held, sync won't double-run).
-    if args.sync and not args.dry_run:
+    if args.sync and not args.dry_run and _CANCELLED:
+        print('\n[CANCELLED] Skipping sync.')
+    elif args.sync and not args.dry_run:
         print(f'\n{"=" * 60}')
         print('  Chaining into plex_hardlink_sync.py...')
         print(f'{"=" * 60}')
@@ -867,7 +931,12 @@ def main() -> None:
         else:
             sync_cmd += ['--all-slots']
         # Pass the open lock fd so sync inherits it — keeps the lock held.
-        subprocess.run(sync_cmd, cwd=os.path.dirname(__file__))
+        _sp = subprocess.Popen(sync_cmd, cwd=os.path.dirname(__file__),
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, bufsize=1)
+        for _line in _sp.stdout:
+            print(_line, end='')
+        _sp.wait()
 
     # Restore stdout from Tee
     if not args.dry_run and isinstance(sys.stdout, Tee):
